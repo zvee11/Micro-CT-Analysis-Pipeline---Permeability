@@ -1,0 +1,89 @@
+# =====================================================================
+#  Trimmed, version-locked environment for the micro-CT pipeline.
+#  Versions are taken from a known-working `pip freeze`.
+#  Install with pip (this environment was built with pip, not conda):
+#
+#      python -m venv .venv
+#      source .venv/bin/activate          # Linux / WSL
+#      .venv\Scripts\activate             # Windows
+#      pip install --upgrade pip
+#      pip install -r requirements.lock.txt
+#
+#  KEPT: pipeline core, the PyVista 3D viewer, and the Dash dashboard.
+#  REMOVED: napari, PyQt5, vispy, Jupyter/JupyterLab, Sphinx/docs,
+#           cupy (CUDA), zarr/dask, and other packages not imported by
+#           this codebase. See requirements.txt for the human-readable list.
+#
+#  NOTE: MPLBM-UT and MPI are NOT pip packages and are installed
+#  separately on the machine that runs the flow simulations.
+# =====================================================================
+
+# ---- Core numerical / imaging ----
+numpy==2.2.6
+scipy==1.15.3
+scikit-image==0.25.2
+connected-components-3d==3.25.0      # imported as `cc3d`
+tifffile==2025.5.10
+imageio==2.37.0                      # scikit-image / tifffile I/O backend
+networkx==3.4.2                      # scikit-image dependency
+lazy_loader==0.4                     # scikit-image dependency
+pooch==1.8.2                         # scikit-image data fetch dependency
+
+# ---- Avizo / Amira reading ----
+ahds==0.2.4
+
+# ---- Database ----
+duckdb==1.5.2
+
+# ---- Reference saturation spreadsheet ----
+openpyxl==3.1.5
+et_xmlfile==2.0.0                    # openpyxl dependency
+
+# ---- Simulation config writing (solve.py) ----
+PyYAML==6.0.3
+
+# ---- Terminal UI ----
+rich==14.2.0
+markdown-it-py==4.0.0                # rich dependency
+mdurl==0.1.2                         # rich dependency
+Pygments==2.19.2                     # rich dependency
+
+# ---- 3D viewer (PyVista + Qt background plotter) ----
+pyvista==0.48.0
+pyvistaqt==0.11.4
+vtk==9.6.1                           # pyvista rendering backend
+PyQt5==5.15.11                       # required by pyvistaqt (GUI viewer)
+PyQt5-Qt5==5.15.2
+PyQt5_sip==12.17.1
+scooby==0.11.2                       # pyvista dependency
+PyOpenGL==3.1.10                     # pyvista/vtk GL backend
+freetype-py==2.5.1                   # vtk text rendering
+
+# ---- Dash analytics dashboard ----
+dash==4.1.0
+dash-bootstrap-components==2.0.4
+plotly==6.7.0
+Flask==3.1.3                         # dash server dependency
+Werkzeug==3.1.8                      # Flask dependency
+itsdangerous==2.2.0                  # Flask dependency
+blinker==1.9.0                       # Flask dependency
+click==8.3.1                         # Flask CLI dependency
+narwhals==2.20.0                     # plotly dependency
+retrying==1.4.2                      # dash dependency
+
+# ---- Plotting / image scripts (validation, visualization) ----
+matplotlib==3.10.7
+pillow==11.3.0                       # imported as PIL
+contourpy==1.3.2                     # matplotlib dependency
+cycler==0.12.1                       # matplotlib dependency
+fonttools==4.60.1                    # matplotlib dependency
+kiwisolver==1.4.9                    # matplotlib dependency
+pyparsing==3.2.5                     # matplotlib dependency
+python-dateutil==2.9.0.post0         # matplotlib / pandas dependency
+
+# ---- Common low-level dependencies ----
+packaging==25.0
+typing_extensions==4.15.0
+six==1.17.0
+Jinja2==3.1.6                        # dash/flask templating
+MarkupSafe==3.0.3                    # Jinja2 dependency
