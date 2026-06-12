@@ -28,22 +28,18 @@ class UnionFind:
             px = parent[x]
             parent[x] = parent[px]
             x = parent[x]
-        return x if x in parent else x
+        return x
 
     def union(self, a: int, b: int) -> None:
         if a == b:
             return
         self.add(a)
         self.add(b)
-
-        ra = self.find(a)
-        rb = self.find(b)
+        ra, rb = self.find(a), self.find(b)
         if ra == rb:
             return
-
         if self.rank[ra] < self.rank[rb]:
             ra, rb = rb, ra
-
         self.parent[rb] = ra
         if self.rank[ra] == self.rank[rb]:
             self.rank[ra] += 1
@@ -52,10 +48,8 @@ class UnionFind:
 def seam_equivalences(prev_plane: np.ndarray | None, curr_plane: np.ndarray) -> set[tuple[int, int]]:
     if prev_plane is None:
         return set()
-
     h, w = prev_plane.shape
     pairs = set()
-
     for dy in (-1, 0, 1):
         y0 = slice(max(0, dy), min(h, h + dy))
         y1 = slice(max(0, -dy), min(h, h - dy))
@@ -79,11 +73,7 @@ def topn_gas_cc(
     logger: logging.Logger,
     on_slab: "Callable[[int, int, int, int, int], None] | None" = None,
 ):
-    """
-    on_slab: optional callback called after each slab completes.
-    Signature: (pass_num, slab_idx, n_slabs, z0, z1) -> None
-    Used by the Rich UI to show live slab progress.
-    """
+    """Two-pass slab-wise connected components; returns (labels_out, report)."""
     if n_keep > 255:
         raise ValueError("n_keep must be <= 255 for uint8 output")
 
@@ -107,17 +97,15 @@ def topn_gas_cc(
         slab_h = (z1 - z0) + halo_top + halo_bottom
 
         start = z0 - halo_top
-        stop = start + slab_h
-        np.equal(vol[start:stop], gas_label, out=mask_buf[:slab_h])
+        np.equal(vol[start:start + slab_h], gas_label, out=mask_buf[:slab_h])
 
         labels_slab = cc3d.connected_components(mask_buf[:slab_h], connectivity=cc_conn)
         n_local = int(labels_slab.max())
         core = labels_slab[halo_top:halo_top + (z1 - z0)]
 
         if n_local > 0:
-            # Use core.max() not labels_slab.max() — halo rows can contain
-            # labels that inflate n_local far beyond what exists in core,
-            # causing np.bincount to allocate gigabytes unnecessarily.
+            # Bound bincount by core.max(), not labels_slab.max(): halo rows can
+            # carry labels that would inflate the allocation by gigabytes.
             n_core = int(core.max())
             counts = np.bincount(core.ravel(), minlength=n_core + 1)
             for local_id in range(1, counts.size):
@@ -169,15 +157,13 @@ def topn_gas_cc(
         slab_h = (z1 - z0) + halo_top + halo_bottom
 
         start = z0 - halo_top
-        stop = start + slab_h
-        np.equal(vol[start:stop], gas_label, out=mask_buf[:slab_h])
+        np.equal(vol[start:start + slab_h], gas_label, out=mask_buf[:slab_h])
 
         labels_slab = cc3d.connected_components(mask_buf[:slab_h], connectivity=cc_conn)
         n_local = int(labels_slab.max())
         core = labels_slab[halo_top:halo_top + (z1 - z0)]
 
         if n_local > 0:
-            # Same fix: bound LUT by core.max() not labels_slab.max()
             n_core = int(core.max())
             lut = np.zeros(n_core + 1, dtype=np.uint8)
             for local_id in range(1, n_core + 1):

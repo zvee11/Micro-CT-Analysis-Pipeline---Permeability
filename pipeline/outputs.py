@@ -14,7 +14,6 @@ from .simulation_domains import make_absolute_domain, make_gas_domain, make_wate
 
 if TYPE_CHECKING:
     from .db import PipelineDB
-    from .visualisation import PyVistaVisualiser
 
 
 def save_outputs(
@@ -27,20 +26,14 @@ def save_outputs(
     crop_margin: int,
     inlet_outlet_threshold: float,
     label_to_track: dict[int, int],
-    save_labels_npy: bool,
     gas_label: int,
     scan_index: int,
     run_id: str,
     db: "PipelineDB",
     logger: logging.Logger,
-    pv_vis: "PyVistaVisualiser | None" = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-
     conn_name = CONNECTIVITY_NAME[connectivity]
-
-    if save_labels_npy:
-        np.save(out_dir / f"labels_top{len(report)}_{conn_name}.npy", labels_out)
 
     z_dim, y_dim, x_dim = labels_out.shape
     voxel_volume = None if spacing is None else spacing[0] * spacing[1] * spacing[2]
@@ -53,7 +46,6 @@ def save_outputs(
             continue
 
         zsl, ysl, xsl = sl
-
         z0_bbox = max(zsl.start - crop_margin, 0)
         z1_bbox = min(zsl.stop + crop_margin, z_dim)
         y0, y1 = 0, y_dim
@@ -61,66 +53,35 @@ def save_outputs(
 
         mask_full = (labels_out[z0_bbox:z1_bbox] == label_id)
         try:
-            z_in, z_out = find_flow_crop_z(
-                mask_full, threshold_fraction=inlet_outlet_threshold
-            )
+            z_in, z_out = find_flow_crop_z(mask_full, threshold_fraction=inlet_outlet_threshold)
             z0 = z0_bbox + z_in
             z1 = z0_bbox + z_out
         except ValueError as exc:
-            logger.warning(
-                "cluster %02d: flow crop failed (%s) — using bbox crop", label_id, exc
-            )
+            logger.warning("cluster %02d: flow crop failed (%s) — using bbox crop", label_id, exc)
             z0, z1 = z0_bbox, z1_bbox
 
         vol_crop = np.array(vol[z0:z1, y0:y1, x0:x1])
-        crop_shape = vol_crop.shape
-
-        # Single-cluster mask — visualisation TIFF only
         mask_crop = (labels_out[z0:z1, y0:y1, x0:x1] == label_id).astype(np.uint8)
 
-        # ── Visualisation TIFFs ─────────────────────────────────────────
         mask_path = out_dir / f"cluster_{label_id:02d}_mask_{conn_name}.tiff"
-        vol_path  = out_dir / f"cluster_{label_id:02d}_volume_{conn_name}.tiff"
+        vol_path = out_dir / f"cluster_{label_id:02d}_volume_{conn_name}.tiff"
         tiff.imwrite(mask_path, mask_crop, photometric="minisblack")
-        tiff.imwrite(vol_path,  vol_crop,  photometric="minisblack")
+        tiff.imwrite(vol_path, vol_crop, photometric="minisblack")
 
-        # ── Simulation domains (.raw) ───────────────────────────────────
         all_gas_mask = (vol_crop == gas_label).astype(np.uint8)
-
-        domain_abs   = make_absolute_domain(vol_crop)
-        domain_gas   = make_gas_domain(vol_crop, all_gas_mask)
-        domain_water = make_water_domain(vol_crop)
-
-        abs_path   = out_dir / f"cluster_{label_id:02d}_domain_absolute_{conn_name}.raw"
-        gas_path   = out_dir / f"cluster_{label_id:02d}_domain_gas_{conn_name}.raw"
+        abs_path = out_dir / f"cluster_{label_id:02d}_domain_absolute_{conn_name}.raw"
+        gas_path = out_dir / f"cluster_{label_id:02d}_domain_gas_{conn_name}.raw"
         water_path = out_dir / f"cluster_{label_id:02d}_domain_water_{conn_name}.raw"
+        make_absolute_domain(vol_crop).tofile(abs_path)
+        make_gas_domain(vol_crop, all_gas_mask).tofile(gas_path)
+        make_water_domain(vol_crop).tofile(water_path)
 
-        domain_abs.tofile(abs_path)
-        domain_gas.tofile(gas_path)
-        domain_water.tofile(water_path)
-
-        # PyVista registration — new API uses register_cluster_at_X
-        # called from pipeline.py after save_outputs completes,
-        # not per-cluster here. pv_vis parameter kept for signature compat.
-
-        track_id    = label_to_track.get(label_id)
-        track_status = "tracked" if track_id is not None else "untracked"
-
+        track_id = label_to_track.get(label_id)
         row = {
             "connectivity":      conn_name,
             "label_id":          label_id,
             "track_id":          track_id,
-            "track_status":      track_status,
             "voxel_count":       voxel_count,
-            "z_min_vox":         zsl.start,
-            "z_max_vox":         zsl.stop - 1,
-            "y_min_vox":         ysl.start,
-            "y_max_vox":         ysl.stop - 1,
-            "x_min_vox":         xsl.start,
-            "x_max_vox":         xsl.stop - 1,
-            "extent_z_vox":      zsl.stop - zsl.start,
-            "extent_y_vox":      ysl.stop - ysl.start,
-            "extent_x_vox":      xsl.stop - xsl.start,
             "crop_z_min_vox":    z0,
             "crop_z_max_vox":    z1 - 1,
             "crop_y_min_vox":    y0,
@@ -136,19 +97,13 @@ def save_outputs(
             "domain_gas":        str(gas_path),
             "domain_water":      str(water_path),
         }
-
         if voxel_volume is not None:
-            row["volume_m3"]  = voxel_count * voxel_volume
             row["volume_mm3"] = voxel_count * voxel_volume * 1e9
 
         db.insert_cluster_property(run_id, scan_index, row)
 
         logger.info(
-            "saved cluster %02d | track=%s | voxels=%d | "
-            "bbox z[%d-%d] | flow crop z[%d-%d] | .raw domains written",
-            label_id,
-            f"{track_id}" if track_id is not None else "none",
-            voxel_count,
-            zsl.start, zsl.stop - 1,
-            z0, z1 - 1,
+            "saved cluster %02d | track=%s | voxels=%d | bbox z[%d-%d] | flow crop z[%d-%d]",
+            label_id, f"{track_id}" if track_id is not None else "none",
+            voxel_count, zsl.start, zsl.stop - 1, z0, z1 - 1,
         )
