@@ -356,6 +356,7 @@ def main() -> None:
                         track_id=box.track_id,
                         gas_voxels=box.voxel_count_at_X,
                         z_extent=box.z1 - box.z0,
+                        box_z_extent=box.z1 - box.z0,
                     )
 
             # Register clusters at timestep X with PyVista
@@ -447,7 +448,7 @@ def main() -> None:
                         (box.label_id_at_X, cog_global, gas_count)
                         for box in boxes
                         if box.track_id in box_results
-                        for gas_count, _sw, cog_global in (box_results[box.track_id],)
+                        for gas_count, _sw, cog_global, _zext in (box_results[box.track_id],)
                     ]
                     tracker.update(
                         input_path.stem, cluster_info, logger,
@@ -460,12 +461,13 @@ def main() -> None:
                 if dash_vis:
                     for box in boxes:
                         if box.track_id in box_results:
-                            gas_count, _sw, _cog = box_results[box.track_id]
+                            gas_count, _sw, _cog, cluster_zext = box_results[box.track_id]
                             dash_vis.update_fixed_box(
                                 scan_index=scan_idx,
                                 track_id=box.track_id,
                                 gas_voxels=gas_count,
-                                z_extent=box.z1 - box.z0,
+                                z_extent=cluster_zext,
+                                box_z_extent=box.z1 - box.z0,
                             )
 
             # Register this Step B scan's domains with PyVista

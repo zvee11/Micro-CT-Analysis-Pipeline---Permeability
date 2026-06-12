@@ -153,13 +153,18 @@ class DashVisualiser:
         track_id: int,
         gas_voxels: int,
         z_extent: int,
+        box_z_extent: int | None = None,
     ) -> None:
         with self._lock:
             if track_id not in self._track_data:
                 self._track_data[track_id] = []
                 self._track_zextent[track_id] = []
+                self._track_box_zextent = getattr(self, "_track_box_zextent", {})
+            self._track_box_zextent = getattr(self, "_track_box_zextent", {})
             self._track_data[track_id].append((scan_index, gas_voxels))
             self._track_zextent[track_id].append((scan_index, z_extent))
+            if box_z_extent is not None:
+                self._track_box_zextent[track_id] = box_z_extent
 
     def update_cluster(
         self,
@@ -320,20 +325,33 @@ class DashVisualiser:
             )
             _apply_dark_layout(gas_fig, "Scan Index", "Gas Voxels")
 
-            # ── Z extent per track ────────────────────────────────────────
+            # ── Z extent per track: cluster extent (line) + box extent (ref) ──
             zext_fig = go.Figure()
+            box_ext = getattr(self, "_track_box_zextent", {})
             for tid, data in sorted(t_zext.items()):
                 d = sorted(data)
+                xs = [r[0] for r in d]
                 zext_fig.add_trace(go.Scatter(
-                    x=[r[0] for r in d], y=[r[1] for r in d],
+                    x=xs, y=[r[1] for r in d],
                     mode="lines+markers",
                     line=dict(color=_track_colour(tid), width=2),
                     marker=dict(size=6),
-                    name=f"Track {tid:02d}",
-                    hovertemplate=f"Track {tid:02d}<br>Scan %{{x}}<br>Z extent: %{{y}} vox<extra></extra>",
+                    name=f"Track {tid:02d} cluster",
+                    hovertemplate=f"Track {tid:02d}<br>Scan %{{x}}<br>Cluster Z: %{{y}} vox<extra></extra>",
                 ))
+                # Horizontal reference line at the frozen box Z-extent
+                if tid in box_ext and xs:
+                    zext_fig.add_trace(go.Scatter(
+                        x=[min(xs), max(xs)],
+                        y=[box_ext[tid], box_ext[tid]],
+                        mode="lines",
+                        line=dict(color=_track_colour(tid), width=1, dash="dash"),
+                        name=f"Track {tid:02d} box",
+                        hovertemplate=f"Track {tid:02d} box Z: {box_ext[tid]} vox<extra></extra>",
+                        showlegend=False,
+                    ))
             zext_fig.update_layout(
-                title=dict(text="Bounding Box Z-Extent per Track",
+                title=dict(text="Cluster Z-Extent per Track (dashed = frozen box)",
                            font=dict(color="#e0e0e0")),
             )
             _apply_dark_layout(zext_fig, "Scan Index", "Z Extent (voxels)")
@@ -420,14 +438,16 @@ class PyVistaVisualiser:
 
     def show_final(self) -> None:
         """
-        Open the PyVista 3D window on the main thread.
-        Blocks until the user closes the window.
-        Must be called from the main thread.
+        Open the PyVista 3D window (blocks until closed). Simple single-view mode.
 
-        Features:
-        - All clusters rendered at their correct spatial position in the volume
-        - Scan slider to scrub through qualifying timesteps
-        - Per-track checkbox buttons to toggle individual cluster visibility
+        - ONE cluster shown at a time in a single 3D view.
+        - A "Scan" slider steps that cluster through its qualifying timesteps
+          (earliest -> latest); the cluster visibly evolves.
+        - A "Track" slider switches which cluster is shown.
+        - Each view shows the isolated tracked cluster + its extraction box.
+
+        Isolation is VIEWER-ONLY (definition (a)); it does not change the gas
+        domain files or the simulation.
         """
         if not self._clusters:
             print("PyVista: no clusters registered — skipping viewer.")
@@ -435,143 +455,205 @@ class PyVistaVisualiser:
 
         self._scan_indices = sorted(self._scan_indices)
         track_ids = sorted(self._clusters.keys())
+        scans = self._scan_indices
+        if not scans or not track_ids:
+            print("PyVista: nothing to display.")
+            return
 
         pv.set_plot_theme("dark")
-        pl = pv.Plotter(
-            window_size=(1400, 900),
-            title="µCT Pipeline — Connected Gas Clusters",
-        )
+        pl = pv.Plotter(window_size=(1100, 850),
+                        title="µCT Pipeline — Cluster Viewer")
 
-        # ── Track visibility state ──────────────────────────────────────────
-        # True = currently visible. All on by default.
-        track_visible: dict[int, bool] = {tid: True for tid in track_ids}
+        # Current selection
+        state = {"track_i": 0, "scan_i": 0, "ref": None}
 
-        # Consistent actor name per track — used for both initial render and
-        # slider updates so there is never more than one mesh per track.
-        def _actor(tid: int) -> str:
-            return f"track_{tid:02d}"
+        TITLE = "title_text"
+        INFO  = "info_text"
 
-        # ── Build and add initial meshes (timestep X) ───────────────────────
-        print("\nBuilding 3D meshes for PyVista viewer...")
-        for tid in track_ids:
-            info     = self._clusters[tid]
-            gas_path = info.get("gas_path_X")
+        def _draw():
+            tid      = track_ids[state["track_i"]]
+            scan_idx = scans[state["scan_i"]]
+            info     = self._clusters.get(tid, {})
             shape    = info.get("shape")
             origin   = info.get("origin", (0, 0, 0))
-            if gas_path is None or shape is None or not gas_path.exists():
-                print(f"  Track {tid:02d}: domain file missing, skipping")
-                continue
-            mesh = self._load_mesh(gas_path, shape, origin)
-            if mesh is not None:
-                pl.add_mesh(
-                    mesh, color=_track_colour(tid), opacity=0.8,
-                    smooth_shading=True, name=_actor(tid),
+            gas_path = info.get("scan_gas_paths", {}).get(scan_idx)
+
+            # Clear the mesh actors (keep widgets/text)
+            pl.remove_actor("iso")
+            pl.remove_actor("box")
+
+            if gas_path is not None and shape is not None and gas_path.exists():
+                _, iso_mesh, new_ref = self._load_full_and_isolated_meshes(
+                    gas_path, shape, origin, ref_point=state["ref"]
                 )
-                print(f"  Track {tid:02d}: {mesh.n_points:,} verts  origin=({origin[0]},{origin[1]},{origin[2]})")
+                state["ref"] = new_ref
+                if iso_mesh is not None:
+                    pl.add_mesh(iso_mesh, color=_track_colour(tid),
+                                opacity=0.95, smooth_shading=True, name="iso")
+                box = self._box_wireframe(origin, shape)
+                pl.add_mesh(box, color=_track_colour(tid), style="wireframe",
+                            line_width=2, opacity=0.6, name="box")
 
-        # ── Scan slider ─────────────────────────────────────────────────────
-        _TEXT_NAME = "scan_info_text"
-        pl.add_text(
-            self._make_scan_text(self._X_scan_index),
-            position="upper_left", font_size=9,
-            color="#e0e0e0", font="courier",
-            name=_TEXT_NAME,
-        )
-
-        def on_slider_change(value):
-            idx      = max(0, min(int(round(value)), len(self._scan_indices) - 1))
-            scan_idx = self._scan_indices[idx]
-
-            for tid in track_ids:
-                info     = self._clusters[tid]
-                shape    = info.get("shape")
-                origin   = info.get("origin", (0, 0, 0))
-                gas_path = info.get("scan_gas_paths", {}).get(scan_idx)
-                if gas_path is None or shape is None or not gas_path.exists():
-                    pl.remove_actor(_actor(tid))
-                    continue
-                mesh = self._load_mesh(gas_path, shape, origin)
-                if mesh is not None:
-                    # Remove then re-add with same name — guarantees only one
-                    # mesh per track exists at any time (no stacking)
-                    pl.remove_actor(_actor(tid))
-                    if track_visible[tid]:
-                        pl.add_mesh(
-                            mesh, color=_track_colour(tid), opacity=0.8,
-                            smooth_shading=True, name=_actor(tid),
-                        )
-
-            pl.remove_actor(_TEXT_NAME)
-            pl.add_text(
-                self._make_scan_text(scan_idx),
-                position="upper_left", font_size=9,
-                color="#e0e0e0", font="courier",
-                name=_TEXT_NAME,
-            )
+            pl.remove_actor(TITLE)
+            pl.add_text(f"Track {tid:02d}", position="upper_left",
+                        font_size=12, color=_track_colour(tid), font="courier",
+                        name=TITLE)
+            pl.remove_actor(INFO)
+            pl.add_text(f"scan {scan_idx}   ({state['scan_i']+1}/{len(scans)})",
+                        position="upper_right", font_size=10,
+                        color="#e0e0e0", font="courier", name=INFO)
             pl.render()
 
-        # Slider — integer range 0..N-1 mapping to scan indices.
-        # PyVista sliders are continuous floats; on_slider_change uses int(round())
-        # to snap to the nearest integer. fmt="%0.0f" shows the integer label.
-        # The scan info text (upper left) updates on every move so you always
-        # know exactly which scan is displayed.
-        if len(self._scan_indices) > 1:
-            n_scans = len(self._scan_indices)
+        def on_scan(value):
+            i = int(round(value))
+            i = max(0, min(i, len(scans) - 1))
+            if i != state["scan_i"]:
+                state["scan_i"] = i
+                _draw()
+
+        def on_track(value):
+            i = int(round(value))
+            i = max(0, min(i, len(track_ids) - 1))
+            if i != state["track_i"]:
+                state["track_i"] = i
+                state["ref"] = None        # reset isolation reference per track
+                state["scan_i"] = 0        # restart timeline at earliest scan
+                _draw()
+
+        # Initial draw
+        print("\nBuilding PyVista viewer...")
+        _draw()
+        pl.camera_position = "iso"
+        pl.add_axes()
+
+        # Scan slider (bottom)
+        if len(scans) > 1:
             pl.add_slider_widget(
-                callback=on_slider_change,
-                rng=[0, n_scans - 1],
-                value=self._scan_indices.index(self._X_scan_index)
-                      if self._X_scan_index in self._scan_indices else 0,
-                title=f"Scan index  (0 = earliest,  {n_scans-1} = timestep X)",
-                pointa=(0.15, 0.06), pointb=(0.85, 0.06),
+                callback=on_scan, rng=[0, len(scans) - 1], value=0,
+                title="Scan  (left = earliest, right = latest)",
+                pointa=(0.20, 0.08), pointb=(0.80, 0.08),
                 style="modern",
             )
 
-        # ── Per-track checkbox buttons ──────────────────────────────────────
-        # Placed in the upper-right corner using normalised viewport coords
-        # so they are never cropped regardless of window size.
-        # Each button is 30px, spaced 40px apart vertically.
-        win_w, win_h = 1400, 900
-        btn_size  = 28
-        btn_gap   = 40        # vertical spacing between buttons
-        btn_x     = win_w - btn_size - 10          # 10px from right edge
-        label_x   = btn_x - 80                     # label to the left of button
-        btn_y_top = win_h - 60                     # start below top edge
-
-        for btn_idx, tid in enumerate(track_ids):
-            col   = _track_colour(tid)
-            btn_y = btn_y_top - btn_idx * btn_gap
-
-            def _make_cb(t=tid):
-                def callback(state):
-                    track_visible[t] = bool(state)
-                    for a_name, a_obj in pl.renderer.actors.items():
-                        if a_name == _actor(t):
-                            a_obj.SetVisibility(int(state))
-                    pl.render()
-                return callback
-
-            pl.add_checkbox_button_widget(
-                callback=_make_cb(),
-                value=True,
-                position=(btn_x, btn_y),
-                size=btn_size,
-                border_size=2,
-                color_on=col,
-                color_off="#444444",
-            )
-            pl.add_text(
-                f"Track {tid:02d}",
-                position=(label_x, btn_y + 4),
-                font_size=8, color=col, font="courier",
+        # Track slider (just above scan slider)
+        if len(track_ids) > 1:
+            pl.add_slider_widget(
+                callback=on_track, rng=[0, len(track_ids) - 1], value=0,
+                title="Track  (slide to switch cluster)",
+                pointa=(0.20, 0.16), pointb=(0.80, 0.16),
+                style="modern",
             )
 
-        pl.camera_position = "iso"
-        pl.add_axes()
         print("Opening PyVista window — close the window to exit.")
         pl.show()
 
     # ── Internal helpers ─────────────────────────────────────────────────────
+
+    def _load_full_and_isolated_meshes(
+        self,
+        gas_domain_path,
+        shape,
+        origin=(0, 0, 0),
+        ref_point=None,
+    ):
+        """
+        Load a gas domain (.raw, 0=gas/1=solid) and return TWO meshes:
+          full_mesh     — all gas in the box (low opacity context)
+          isolated_mesh — only the connected component containing ref_point
+                          (the tracked cluster; definition (a)).
+          new_ref       — the CoG (z,y,x in local box coords) of the isolated
+                          component, to carry forward to the next scan.
+
+        This is VIEWER-ONLY. It does not touch the gas domain files or the
+        simulation. ref_point is in local (downsampled) box coordinates; if
+        None, the largest component is used as the reference (timestep X).
+        """
+        try:
+            import cc3d
+            raw = np.fromfile(str(gas_domain_path), dtype=np.uint8)
+            if raw.size != int(np.prod(shape)):
+                return None, None, ref_point
+            vol = raw.reshape(shape)
+            d = self._downsample
+            vol_ds = vol[::d, ::d, ::d]
+            gas = (vol_ds == 0)              # 0 = gas in the domain convention
+            if not gas.any():
+                return None, None, ref_point
+
+            # Connected components of the gas in this box (26-connectivity)
+            labels = cc3d.connected_components(gas.astype(np.uint8), connectivity=26)
+            n = int(labels.max())
+            if n == 0:
+                return None, None, ref_point
+
+            # Choose the component for the tracked cluster
+            if ref_point is None:
+                # timestep X: take the largest component as the reference
+                counts = np.bincount(labels.ravel())
+                counts[0] = 0
+                chosen = int(counts.argmax())
+            else:
+                rz, ry, rx = ref_point
+                rz = int(min(max(rz, 0), labels.shape[0] - 1))
+                ry = int(min(max(ry, 0), labels.shape[1] - 1))
+                rx = int(min(max(rx, 0), labels.shape[2] - 1))
+                chosen = int(labels[rz, ry, rx])
+                if chosen == 0:
+                    # ref point landed on non-gas — fall back to nearest component
+                    # by using the largest as a safe default
+                    counts = np.bincount(labels.ravel())
+                    counts[0] = 0
+                    chosen = int(counts.argmax())
+
+            isolated = (labels == chosen)
+
+            # New reference CoG (local downsampled coords) for the next scan
+            idx = np.argwhere(isolated)
+            new_ref = tuple(idx.mean(axis=0)) if idx.size else ref_point
+
+            full_mesh = self._mesh_from_bool(gas, d, origin)
+            iso_mesh = self._mesh_from_bool(isolated, d, origin)
+            return full_mesh, iso_mesh, new_ref
+        except Exception as e:
+            print(f"  PyVista isolate error for {gas_domain_path.name}: {e}")
+            return None, None, ref_point
+
+    def _mesh_from_bool(self, gas_bool, d, origin):
+        """Marching-cubes mesh from a boolean gas array already downsampled by d."""
+        try:
+            if not gas_bool.any():
+                return None
+            gas_vol = gas_bool.astype(np.float32)
+            padded = np.pad(gas_vol, 1, constant_values=0)
+            verts, faces, _, _ = marching_cubes(
+                padded, level=0.5,
+                spacing=(float(d), float(d), float(d)),
+                allow_degenerate=False,
+            )
+            verts -= float(d)
+            verts += np.array([float(origin[0]), float(origin[1]), float(origin[2])])
+            n = len(faces)
+            mesh = pv.PolyData(verts, np.hstack([np.full((n, 1), 3), faces]).ravel())
+            # No smoothing: Laplacian smoothing pulls the surface INWARD, which
+            # creates a false gap between the gas and the extraction box. The gas
+            # must reach the box walls (larger clusters are clipped by the box),
+            # so we keep the true marching-cubes surface at the voxel boundary.
+            return mesh
+        except Exception:
+            return None
+
+    def _box_wireframe(self, origin, shape):
+        """Wireframe pv.Box at the extraction-box bounds (origin..origin+shape)."""
+        z0, y0, x0 = origin
+        nz, ny, nx = shape
+        # pv.Box expects bounds in (xmin,xmax, ymin,ymax, zmin,zmax).
+        # Our mesh verts are in (Z, Y, X) order, so map: x-axis<-Z, y-axis<-Y, z-axis<-X
+        # to match how _mesh_from_bool places verts as (Z, Y, X).
+        return pv.Box(bounds=(
+            float(z0), float(z0 + nz),
+            float(y0), float(y0 + ny),
+            float(x0), float(x0 + nx),
+        ))
 
     def _load_mesh(
         self,

@@ -242,9 +242,21 @@ def detect_and_fix_x_wraparound(vol: np.ndarray, logger: logging.Logger) -> np.n
         sliver_end - 1, sliver_end, gap_end - 1, shift
     )
 
-    # np.roll shifts the sliver to the right end where it belongs
-    vol = np.roll(vol, -shift, axis=2)
-    logger.info("X wrap-around corrected.")
+    # Roll left by `shift` along X, processing in Z-slabs so the temporary
+    # never exceeds one slab. A plain `vol[:, :, :-shift] = vol[:, :, shift:]`
+    # forces NumPy to materialise the full right-hand slice (~2 GB for a
+    # 3780x750x750 volume), which overflows a small-RAM machine. Chunking the
+    # copy keeps peak extra memory to roughly one slab (~120 MB at slab=256).
+    nz = vol.shape[0]
+    slab = 256                                  # Z-slices per chunk; lower = less RAM
+    saved = vol[:, :, :shift].copy()            # small: the wrapped sliver (all Z)
+    for z0 in range(0, nz, slab):
+        z1 = min(z0 + slab, nz)
+        block = vol[z0:z1, :, shift:].copy()    # temporary: only `slab` slices wide
+        vol[z0:z1, :, :-shift] = block
+        vol[z0:z1, :, -shift:] = saved[z0:z1]
+    del saved
+    logger.info("X wrap-around corrected (chunked in-place, slab=%d).", slab)
     return vol
 
 

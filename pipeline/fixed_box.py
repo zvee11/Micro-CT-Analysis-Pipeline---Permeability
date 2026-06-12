@@ -162,6 +162,15 @@ def apply_frozen_boxes(
         np.equal(vol_slice, gas_label, out=gas_mask)
         gas_count = int(gas_mask.sum())
 
+        # Cluster's true Z-extent at this scan: number of Z-slices in the
+        # box that actually contain gas (differs from the frozen box height).
+        if gas_count > 0:
+            z_has_gas = gas_mask.any(axis=(1, 2))      # per-Z: any gas in slice
+            z_idx = np.where(z_has_gas)[0]
+            cluster_z_extent = int(z_idx[-1] - z_idx[0] + 1)
+        else:
+            cluster_z_extent = 0
+
         mask_path = out_dir / f"track_{box.track_id:02d}_mask_{conn_name}.tiff"
         tiff.imwrite(mask_path, gas_mask, photometric="minisblack")
 
@@ -188,7 +197,7 @@ def apply_frozen_boxes(
                 (box.x0 + box.x1) / 2.0,
             )
 
-        results[box.track_id] = (gas_count, sw_local, cog_global)
+        results[box.track_id] = (gas_count, sw_local, cog_global, cluster_z_extent)
 
         # ── Simulation domains (.raw) ───────────────────────────────────────
         abs_path   = out_dir / f"track_{box.track_id:02d}_domain_absolute_{conn_name}.raw"
