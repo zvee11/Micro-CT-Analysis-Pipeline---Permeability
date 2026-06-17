@@ -31,9 +31,10 @@ def save_outputs(
     run_id: str,
     db: "PipelineDB",
     logger: logging.Logger,
-) -> None:
+) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     conn_name = CONNECTIVITY_NAME[connectivity]
+    clustermask_info: dict = {}
 
     z_dim, y_dim, x_dim = labels_out.shape
     voxel_volume = None if spacing is None else spacing[0] * spacing[1] * spacing[2]
@@ -61,12 +62,12 @@ def save_outputs(
             z0, z1 = z0_bbox, z1_bbox
 
         vol_crop = np.array(vol[z0:z1, y0:y1, x0:x1])
-        mask_crop = (labels_out[z0:z1, y0:y1, x0:x1] == label_id).astype(np.uint8)
+        # mask_crop = (labels_out[z0:z1, y0:y1, x0:x1] == label_id).astype(np.uint8)
 
-        mask_path = out_dir / f"cluster_{label_id:02d}_mask_{conn_name}.tiff"
-        vol_path = out_dir / f"cluster_{label_id:02d}_volume_{conn_name}.tiff"
-        tiff.imwrite(mask_path, mask_crop, photometric="minisblack")
-        tiff.imwrite(vol_path, vol_crop, photometric="minisblack")
+        # mask_path = out_dir / f"cluster_{label_id:02d}_mask_{conn_name}.tiff"
+        # vol_path = out_dir / f"cluster_{label_id:02d}_volume_{conn_name}.tiff"
+        # tiff.imwrite(mask_path, mask_crop, photometric="minisblack")
+        # tiff.imwrite(vol_path, vol_crop, photometric="minisblack")
 
         all_gas_mask = (vol_crop == gas_label).astype(np.uint8)
         abs_path = out_dir / f"cluster_{label_id:02d}_domain_absolute_{conn_name}.raw"
@@ -75,6 +76,15 @@ def save_outputs(
         make_absolute_domain(vol_crop).tofile(abs_path)
         make_gas_domain(vol_crop, all_gas_mask).tofile(gas_path)
         make_water_domain(vol_crop).tofile(water_path)
+
+        # Full tracked cluster mask over the cluster's OWN Z-extent (bbox, full
+        # Y/X) — i.e. the whole connected cluster including the sub-threshold
+        # tails the 10% flow-crop removes. Saved as 0/1 so the viewer can show
+        # the whole cluster with the cropped extraction box drawn inside it.
+        clustermask = (labels_out[z0_bbox:z1_bbox, y0:y1, x0:x1] == label_id).astype(np.uint8)
+        clustermask_path = out_dir / f"cluster_{label_id:02d}_clustermask_{conn_name}.raw"
+        clustermask.tofile(clustermask_path)
+        cm_z0, cm_z1 = z0_bbox, z1_bbox - 1   # inclusive, full-volume coords
 
         track_id = label_to_track.get(label_id)
         row = {
@@ -91,19 +101,31 @@ def save_outputs(
             "crop_extent_z_vox": z1 - z0,
             "crop_extent_y_vox": y1 - y0,
             "crop_extent_x_vox": x1 - x0,
-            "mask_tiff":         str(mask_path),
-            "volume_tiff":       str(vol_path),
+            "mask_tiff":         None,
+            "volume_tiff":       None,
             "domain_absolute":   str(abs_path),
             "domain_gas":        str(gas_path),
             "domain_water":      str(water_path),
+            "clustermask_raw":   str(clustermask_path),
+            "clustermask_z0":    cm_z0,
+            "clustermask_z1":    cm_z1,
         }
         if voxel_volume is not None:
             row["volume_mm3"] = voxel_count * voxel_volume * 1e9
 
         db.insert_cluster_property(run_id, scan_index, row)
 
+        if track_id is not None:
+            clustermask_info[track_id] = {
+                "path": clustermask_path,
+                "z0": cm_z0, "z1": cm_z1, "y0": y0, "x0": x0,
+                "shape": (cm_z1 - cm_z0 + 1, y1 - y0, x1 - x0),
+            }
+
         logger.info(
             "saved cluster %02d | track=%s | voxels=%d | bbox z[%d-%d] | flow crop z[%d-%d]",
             label_id, f"{track_id}" if track_id is not None else "none",
             voxel_count, zsl.start, zsl.stop - 1, z0, z1 - 1,
         )
+
+    return clustermask_info

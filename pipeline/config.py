@@ -11,12 +11,12 @@ class Config:
     input_glob: str = "*.am"
 
     gas_label: int = 2
-    n_keep: int = 5
+    n_keep: int = 6
     slab_depth: int = 128
-    connectivities: tuple[int, ...] = (3,)
+    connectivities: tuple[int, ...] = (2,)
 
     crop_margin: int = 10
-    inlet_outlet_threshold: float = 0.10  # min slice area as fraction of peak Z-slice
+    inlet_outlet_threshold: float = 0.20  # min slice area as fraction of peak Z-slice
     track_clusters: bool = True
 
     regime_cutoff: str = "transition"      # "transition" (default) | "displacement"
@@ -26,8 +26,8 @@ class Config:
 
     enable_ui: bool = True
     enable_pyvista: bool = True
-    pyvista_downsample: int = 8
-    enable_dash: bool = True
+    pyvista_downsample: int = 4
+    enable_dash: bool = False
     dash_port: int = 8050
 
     saturation_file: str = "data/18_Sg_3d.xlsx"  # empty to skip reference comparison

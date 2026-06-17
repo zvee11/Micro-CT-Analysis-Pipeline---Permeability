@@ -104,7 +104,12 @@ def main() -> None:
     if cfg.enable_pyvista:
         try:
             from .visualisation import PyVistaVisualiser
-            pv_vis = PyVistaVisualiser(downsample=cfg.pyvista_downsample)
+            pv_vis = PyVistaVisualiser(
+                downsample=cfg.pyvista_downsample,
+                run_id=run_id,
+                db_path=Path("results.duckdb"),
+                connectivity=CONNECTIVITY_NAME[cfg.connectivities[0]],
+            )
         except ImportError:
             pass
 
@@ -200,7 +205,7 @@ def main() -> None:
         conn_name_x = CONNECTIVITY_NAME[connectivity]
         out_dir_x = cfg.out_dir / x_path.stem / conn_name_x
 
-        save_outputs(
+        clustermask_info = save_outputs(
             labels_out=labels_out, report=report, vol=vol, spacing=spacing,
             out_dir=out_dir_x, connectivity=connectivity, crop_margin=cfg.crop_margin,
             inlet_outlet_threshold=cfg.inlet_outlet_threshold, label_to_track=label_to_track,
@@ -222,6 +227,13 @@ def main() -> None:
             total_x = box.voxel_count_at_X + brine_x
             sw_x = brine_x / total_x if total_x > 0 else float("nan")
 
+            # The tracked cluster at X is labels_out == label_id; the box's Z-bounds
+            # were derived from this cluster's Z-extent, so it spans the box by
+            # construction. No second cc3d needed — read the count from labels_out.
+            cluster_voxels_x = box.voxel_count_at_X
+            spanning_count_x = 1
+            percolates_x = True
+
             row_x = {
                 "file_stem":                x_path.stem,
                 "connectivity":             conn_name_x,
@@ -241,6 +253,9 @@ def main() -> None:
                 "gas_voxels_at_X":          box.voxel_count_at_X,
                 "brine_voxels":             brine_x,
                 "sw_local":                 sw_x,
+                "percolates":               percolates_x,
+                "spanning_count":           spanning_count_x,
+                "cluster_voxels":           cluster_voxels_x,
                 "volume_tiff": str(out_dir_x / f"cluster_{box.label_id_at_X:02d}_volume_{conn_name_x}.tiff"),
                 "mask_tiff":   str(out_dir_x / f"cluster_{box.label_id_at_X:02d}_mask_{conn_name_x}.tiff"),
                 "domain_absolute": str(out_dir_x / f"cluster_{box.label_id_at_X:02d}_domain_absolute_{conn_name_x}.raw"),
@@ -250,8 +265,10 @@ def main() -> None:
             if voxel_volume_x is not None:
                 row_x["gas_volume_mm3"] = box.voxel_count_at_X * voxel_volume_x * 1e9
             db.insert_fixed_box(run_id, X, row_x)
-            logger.info("timestep X fixed_box track %02d | brine=%d gas=%d sw_local=%.4f",
-                        box.track_id, brine_x, box.voxel_count_at_X, sw_x)
+            logger.info("timestep X fixed_box track %02d | brine=%d gas=%d sw_local=%.4f | "
+                        "percolates=%s spanning=%d cluster=%d",
+                        box.track_id, brine_x, box.voxel_count_at_X, sw_x,
+                        percolates_x, spanning_count_x, cluster_voxels_x)
 
         if dash_vis:
             for box in frozen_boxes[connectivity]:
@@ -267,6 +284,7 @@ def main() -> None:
                 pv_vis.register_cluster_at_X(
                     track_id=box.track_id, gas_domain_path=gas_path, shape=shape,
                     scan_index=X, spacing=spacing, origin=(box.z0, box.y0, box.x0),
+                    clustermask=clustermask_info.get(box.track_id),
                 )
 
         del labels_out

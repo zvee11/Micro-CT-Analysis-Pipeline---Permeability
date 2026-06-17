@@ -232,22 +232,15 @@ class PyVistaVisualiser:
     Isolation is viewer-only — it does not alter the gas domain files or the simulation.
     """
 
-    def __init__(self, downsample: int = DOWNSAMPLE_DEFAULT,
-                 run_id: str | None = None, db_path=None, connectivity: str | None = None):
+    def __init__(self, downsample: int = DOWNSAMPLE_DEFAULT):
         if not _PYVISTA_OK:
             raise ImportError("PyVista and scikit-image are required. "
                               "Install with: pip install pyvista scikit-image")
         self._downsample = downsample
-        self._run_id = run_id
-        self._db_path = db_path
-        self._connectivity = connectivity
         self._clusters: dict[int, dict] = {}
         self._scan_indices: list[int] = []
         self._X_scan_index: int = -1
         self._spacing: tuple | None = None
-        # Per-track percolation results computed by the button:
-        # {track_id: {scan_index: {"percolates": bool, "mesh": pv.PolyData|None}}}
-        self._percolation: dict[int, dict] = {}
 
     def register_cluster_at_X(self, track_id, gas_domain_path, shape, scan_index,
                               spacing=None, origin=(0, 0, 0), clustermask=None) -> None:
@@ -289,7 +282,7 @@ class PyVistaVisualiser:
         pv.set_plot_theme("dark")
         pl = pv.Plotter(window_size=(1100, 850), title="µCT Pipeline — Cluster Viewer")
 
-        state = {"track_i": 0, "scan_i": 0}
+        state = {"track_i": 0, "scan_i": 0, "ref": None}
         TITLE, INFO = "title_text", "info_text"
 
         def _draw(recenter=True):
@@ -302,22 +295,9 @@ class PyVistaVisualiser:
             is_x = (scan_idx == self._X_scan_index)
 
             pl.remove_actor("iso")
-            pl.remove_actor("gas")
             pl.remove_actor("box")
 
-            # Percolation result for this (track, scan), if the button computed it.
-            perc = self._percolation.get(tid, {}).get(scan_idx)
-            # gas colour: red when computed-and-not-percolating, else track colour.
-            gas_colour = "#d32f2f" if (perc is not None and not perc["percolates"]) else _track_colour(tid)
-
-            # All gas in the section at low opacity (every scan).
-            if gas_path is not None and shape is not None and gas_path.exists():
-                gas_mesh = self._load_gas_mesh(gas_path, shape, origin)
-                if gas_mesh is not None:
-                    pl.add_mesh(gas_mesh, color=gas_colour, opacity=0.15,
-                                smooth_shading=True, name="gas")
-
-            # At timestep X, show the whole tracked cluster at high opacity.
+            percolates = True
             whole = False
             cm = info.get("clustermask")
             if is_x and cm is not None:
@@ -326,10 +306,13 @@ class PyVistaVisualiser:
                 if iso_mesh is not None:
                     pl.add_mesh(iso_mesh, color=_track_colour(tid), opacity=0.95,
                                 smooth_shading=True, name="iso")
-            # Non-X: if the button found a spanning component, highlight it high-opacity.
-            elif perc is not None and perc["percolates"] and perc["mesh"] is not None:
-                pl.add_mesh(perc["mesh"], color=_track_colour(tid), opacity=0.95,
-                            smooth_shading=True, name="iso")
+            elif gas_path is not None and shape is not None and gas_path.exists():
+                _, iso_mesh, new_ref, percolates = self._load_full_and_isolated_meshes(
+                    gas_path, shape, origin, ref_point=state["ref"])
+                state["ref"] = new_ref
+                if iso_mesh is not None:
+                    pl.add_mesh(iso_mesh, color=_track_colour(tid) if percolates else "#d32f2f",
+                                opacity=0.95, smooth_shading=True, name="iso")
 
             box = None
             if shape is not None:
@@ -338,9 +321,14 @@ class PyVistaVisualiser:
                             line_width=2, opacity=0.6, name="box")
 
             pl.remove_actor(TITLE)
-            status = "   [whole cluster @ X]" if whole else ""
+            if whole:
+                status, tcol = "   [whole cluster @ X]", _track_colour(tid)
+            elif percolates:
+                status, tcol = "", _track_colour(tid)
+            else:
+                status, tcol = "   [NON-PERCOLATING]", "#d32f2f"
             pl.add_text(f"Track {tid:02d}{status}", position="upper_left", font_size=12,
-                        color=_track_colour(tid), font="courier", name=TITLE)
+                        color=tcol, font="courier", name=TITLE)
             pl.remove_actor(INFO)
             marker = "  <- timestep X" if is_x else ""
             pl.add_text(f"scan {scan_idx}{marker}   ({state['scan_i']+1}/{len(scans)})",
@@ -361,14 +349,9 @@ class PyVistaVisualiser:
             i = max(0, min(int(round(value)), len(track_ids) - 1))
             if i != state["track_i"]:
                 state["track_i"] = i
+                state["ref"] = None
                 state["scan_i"] = 0
                 _draw(recenter=True)
-
-        def on_percolation(_state=None):
-            tid = track_ids[state["track_i"]]
-            print(f"\n[percolation] computing track {tid:02d} across all scans...")
-            self._compute_percolation_for_track(tid)
-            _draw(recenter=False)
 
         print("\nBuilding PyVista viewer...")
         _draw()
@@ -384,120 +367,54 @@ class PyVistaVisualiser:
                                  title="Track  (slide to switch cluster)",
                                  pointa=(0.20, 0.16), pointb=(0.80, 0.16), style="modern")
 
-        # "Check percolation" button: computes the current track across all scans,
-        # writes results to the DB, and highlights the spanning component per scan.
-        pl.add_text("Check percolation", position=(40, 70), font_size=9,
-                    color="#e0e0e0", font="courier", name="perc_label")
-        pl.add_checkbox_button_widget(on_percolation, value=False,
-                                      position=(10, 65), size=25,
-                                      color_on="#4caf50", color_off="#888888")
-
         print("Opening PyVista window — close the window to exit.")
         pl.show()
 
-    def _load_gas_mesh(self, gas_domain_path, shape, origin=(0, 0, 0)):
-        """Load a gas domain (.raw, 0=gas/1=solid) and mesh ALL gas at the
-        current downsample. No connectivity/percolation — just the full gas in
-        the section, for low-opacity context. Returns a mesh or None."""
+    def _load_full_and_isolated_meshes(self, gas_domain_path, shape, origin=(0, 0, 0), ref_point=None):
+        """Load a gas domain (.raw, 0=gas/1=solid); return (full_mesh, iso_mesh, new_ref, percolates).
+
+        Isolated = the PERCOLATING cluster: largest connected component spanning
+        both Z-faces. Detected at FULL resolution (downsampling first severs the
+        thin thread), then only the isolated cluster is downsampled for meshing.
+        If nothing spans, the largest component is shown and percolates=False.
+        """
         try:
+            import cc3d
             raw = np.fromfile(str(gas_domain_path), dtype=np.uint8)
             if raw.size != int(np.prod(shape)):
-                return None
+                return None, None, ref_point, False
             vol = raw.reshape(shape)
-            gas = (vol == 0)
-            if not gas.any():
-                return None
             d = self._downsample
-            return self._mesh_from_bool(gas[::d, ::d, ::d], d, origin)
+            gas_full = (vol == 0)
+            if not gas_full.any():
+                return None, None, ref_point, False
+
+            labels = cc3d.connected_components(gas_full.astype(np.uint8), connectivity=26)
+            if int(labels.max()) == 0:
+                return None, None, ref_point, False
+
+            inlet = set(np.unique(labels[0])) - {0}
+            outlet = set(np.unique(labels[-1])) - {0}
+            spanning = inlet & outlet
+            if spanning:
+                chosen = max(spanning, key=lambda c: int((labels == c).sum()))
+                percolates = True
+            else:
+                counts = np.bincount(labels.ravel()); counts[0] = 0
+                chosen = int(counts.argmax()); percolates = False
+
+            isolated_full = (labels == chosen)
+            gas_ds = gas_full[::d, ::d, ::d]
+            isolated_ds = isolated_full[::d, ::d, ::d]
+            idx = np.argwhere(isolated_ds)
+            new_ref = tuple(idx.mean(axis=0)) if idx.size else ref_point
+
+            full_mesh = self._mesh_from_bool(gas_ds, d, origin)
+            iso_mesh = self._mesh_from_bool(isolated_ds, d, origin)
+            return full_mesh, iso_mesh, new_ref, percolates
         except Exception as e:
-            print(f"  PyVista gas-mesh error for {gas_domain_path.name}: {e}")
-            return None
-
-    def _compute_percolation_for_track(self, tid):
-        """Button worker. For the current track, over all NON-X scans:
-        load the scan's gas .raw, run cc3d at FULL resolution, take the largest
-        component spanning both Z-faces, write percolates/spanning_count/
-        cluster_voxels to the DB, and keep a small DOWNSAMPLED mesh of the
-        spanning component for display. One full-res box in memory at a time
-        (freed each scan). Full res is mandatory for cc3d; downsampling is only
-        for the on-screen mesh.
-        """
-        import cc3d
-        import gc as _gc
-
-        info = self._clusters.get(tid, {})
-        shape = info.get("shape")
-        origin = info.get("origin", (0, 0, 0))
-        gas_paths = info.get("scan_gas_paths", {})
-        d = self._downsample
-        self._percolation[tid] = {}
-
-        con = self._open_db()
-        try:
-            for scan_idx in sorted(gas_paths):
-                if scan_idx == self._X_scan_index:
-                    continue  # X keeps its pipeline values; not recomputed
-                gas_path = gas_paths[scan_idx]
-                if shape is None or not Path(gas_path).exists():
-                    print(f"  [percolation] track {tid:02d} scan {scan_idx}: gas missing, skipped")
-                    continue
-
-                raw = np.fromfile(str(gas_path), dtype=np.uint8)
-                if raw.size != int(np.prod(shape)):
-                    print(f"  [percolation] track {tid:02d} scan {scan_idx}: size mismatch, skipped")
-                    continue
-                gas_full = (raw.reshape(shape) == 0)  # FULL res, gas==0 in domain .raw
-
-                percolates, spanning_count, cluster_voxels, mesh = False, 0, 0, None
-                if gas_full.any():
-                    labels = cc3d.connected_components(gas_full.astype(np.uint8), connectivity=26)
-                    inlet = set(np.unique(labels[0])) - {0}
-                    outlet = set(np.unique(labels[-1])) - {0}
-                    spanning = inlet & outlet
-                    if spanning:
-                        chosen = max(spanning, key=lambda c: int((labels == c).sum()))
-                        component = (labels == chosen)
-                        percolates = True
-                        spanning_count = len(spanning)
-                        cluster_voxels = int(component.sum())
-                        # downsample ONLY for the display mesh
-                        mesh = self._mesh_from_bool(component[::d, ::d, ::d], d, origin)
-                    del labels
-                del gas_full, raw
-
-                if con is not None:
-                    try:
-                        con.execute(
-                            "UPDATE fixed_boxes SET percolates=?, spanning_count=?, cluster_voxels=? "
-                            "WHERE run_id=? AND scan_index=? AND track_id=? AND connectivity=?",
-                            (percolates, spanning_count, cluster_voxels,
-                             self._run_id, scan_idx, tid, self._connectivity),
-                        )
-                    except Exception as e:
-                        print(f"  [percolation] DB write failed (scan {scan_idx}): {e}")
-
-                self._percolation[tid][scan_idx] = {"percolates": percolates, "mesh": mesh}
-                print(f"  [percolation] track {tid:02d} scan {scan_idx}: "
-                      f"percolates={percolates} spanning={spanning_count} voxels={cluster_voxels}")
-                _gc.collect()
-        finally:
-            if con is not None:
-                con.close()
-        print(f"  [percolation] track {tid:02d} done.")
-
-    def _open_db(self):
-        """Short-lived DuckDB connection for the button to UPDATE results.
-        Returns None (and prints) if unavailable, so the viewer never crashes."""
-        if not (self._run_id and self._db_path and self._connectivity):
-            print("  [percolation] no DB context (run_id/db_path/connectivity); "
-                  "highlight only, not saved.")
-            return None
-        try:
-            import duckdb
-            return duckdb.connect(str(self._db_path))
-        except Exception as e:
-            print(f"  [percolation] could not open DB ({e}); highlight only, not saved.")
-            return None
+            print(f"  PyVista isolate error for {gas_domain_path.name}: {e}")
+            return None, None, ref_point, False
 
     def _clustermask_mesh(self, cm):
         """Mesh the whole tracked cluster mask saved at X (0/1 .raw, 1=cluster),

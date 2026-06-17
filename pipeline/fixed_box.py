@@ -108,7 +108,7 @@ def apply_frozen_boxes(
         vol_slice = vol[box.z0:box.z1, box.y0:box.y1, box.x0:box.x1]
 
         vol_path = out_dir / f"track_{box.track_id:02d}_volume_{conn_name}.tiff"
-        tiff.imwrite(vol_path, np.ascontiguousarray(vol_slice), photometric="minisblack")
+        # tiff.imwrite(vol_path, np.ascontiguousarray(vol_slice), photometric="minisblack")  # inspection-only, not read by any code
 
         gas_mask = np.empty(vol_slice.shape, dtype=np.uint8)
         np.equal(vol_slice, gas_label, out=gas_mask)
@@ -121,8 +121,15 @@ def apply_frozen_boxes(
         else:
             cluster_z_extent = 0
 
+        # Percolation is NOT computed during the run. It is computed on demand
+        # from the viewer ("Check percolation" button), which runs cc3d and writes
+        # percolates/spanning_count/cluster_voxels back into these rows. NULL here.
+        percolates = None
+        spanning_count = None
+        cluster_voxels = None
+
         mask_path = out_dir / f"track_{box.track_id:02d}_mask_{conn_name}.tiff"
-        tiff.imwrite(mask_path, gas_mask, photometric="minisblack")
+        # tiff.imwrite(mask_path, gas_mask, photometric="minisblack")  # inspection-only, not read by any code
 
         brine_count = int(np.sum(vol_slice == 1))
         total_fluid = gas_count + brine_count
@@ -163,6 +170,9 @@ def apply_frozen_boxes(
             "gas_voxels_at_X":          box.voxel_count_at_X,
             "brine_voxels":             brine_count,
             "sw_local":                 sw_local,
+            "percolates":               percolates,
+            "spanning_count":           spanning_count,
+            "cluster_voxels":           cluster_voxels,
             "volume_tiff":              str(vol_path),
             "mask_tiff":                str(mask_path),
             "domain_absolute":          str(abs_path),
@@ -175,10 +185,10 @@ def apply_frozen_boxes(
         db.insert_fixed_box(run_id, scan_index, row)
 
         logger.info(
-            "applied frozen box track %02d | gas=%d brine=%d sw_local=%.4f | cog=(%.1f,%.1f,%.1f) | file=%s",
+            "applied frozen box track %02d | gas=%d brine=%d sw_local=%.4f | file=%s",
             box.track_id, gas_count, brine_count,
             sw_local if sw_local == sw_local else float("nan"),
-            cog_global[0], cog_global[1], cog_global[2], file_stem,
+            file_stem,
         )
 
     return results

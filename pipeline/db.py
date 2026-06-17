@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS fixed_boxes (
     brine_voxels            INTEGER,
     gas_volume_mm3          DOUBLE,
     sw_local                DOUBLE,
+    percolates              BOOLEAN,  -- a gas component spans box inlet-to-outlet in Z
+    spanning_count          INTEGER,  -- how many components span (>1 = the cluster split)
+    cluster_voxels          INTEGER,  -- voxels in the largest spanning (percolating) cluster
     volume_tiff             TEXT,
     mask_tiff               TEXT,
     domain_absolute         TEXT,
@@ -103,6 +106,9 @@ CREATE TABLE IF NOT EXISTS cluster_properties (
     domain_absolute TEXT,
     domain_gas      TEXT,
     domain_water    TEXT,
+    clustermask_raw TEXT,     -- full tracked cluster (0/1) over its own Z-extent, full Y/X
+    clustermask_z0  INTEGER,  -- cluster mask first Z-slice (full-volume coords)
+    clustermask_z1  INTEGER,  -- cluster mask last Z-slice (inclusive)
     PRIMARY KEY (run_id, scan_index, label_id, connectivity)
 );
 
@@ -124,6 +130,25 @@ CREATE TABLE IF NOT EXISTS simulation_results (
     notes           TEXT,
     PRIMARY KEY (run_id, scan_index, track_id, connectivity, sim_type, simulator)
 );
+
+CREATE TABLE IF NOT EXISTS prior_work_provenance (
+    run_id          TEXT    NOT NULL REFERENCES runs(run_id),
+    scan_file       TEXT    NOT NULL,   -- the .am file this step came from
+    step_order      INTEGER NOT NULL,   -- order within that file's HistoryLog
+    module          TEXT,               -- Avizo module name (e.g. InteractiveThresholding)
+    label           TEXT,               -- human label (e.g. "Interactive Thresholding")
+    avizo_version   TEXT,
+    step_date       TEXT,               -- ISO date Avizo recorded for the step
+    parameters      TEXT,               -- full parameter set as JSON (verbatim)
+    lattice_z       INTEGER,            -- volume dims parsed from 'define Lattice'
+    lattice_y       INTEGER,
+    lattice_x       INTEGER,
+    bbox            TEXT,               -- BoundingBox (xmin xmax ymin ymax zmin zmax) as text
+    voxel_dz_m      DOUBLE,             -- voxel size (metres) extracted from bbox/(n-1)
+    voxel_dy_m      DOUBLE,
+    voxel_dx_m      DOUBLE,
+    PRIMARY KEY (run_id, scan_file, step_order)
+);
 """
 
 
@@ -135,7 +160,30 @@ class PipelineDB:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con = duckdb.connect(str(db_path))
         self._con.execute(_SCHEMA)
+        self._migrate()
         self._db_path = db_path
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created. Idempotent."""
+        added = {
+            "fixed_boxes": [
+                ("percolates", "BOOLEAN"),
+                ("spanning_count", "INTEGER"),
+                ("cluster_voxels", "INTEGER"),
+            ],
+            "cluster_properties": [
+                ("clustermask_raw", "TEXT"),
+                ("clustermask_z0", "INTEGER"),
+                ("clustermask_z1", "INTEGER"),
+            ],
+        }
+        for table, cols in added.items():
+            existing = {r[0] for r in self._con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{table}'").fetchall()}
+            for name, sqltype in cols:
+                if name not in existing:
+                    self._con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}")
 
     def init_run(self, run_id: str, cfg: Config) -> None:
         self._con.execute(
@@ -198,14 +246,16 @@ class PipelineDB:
                 (run_id, scan_index, track_id, connectivity,
                  z0, z1, y0, y1, x0, x1, extent_z, extent_y, extent_x,
                  gas_voxels, gas_voxels_at_X, brine_voxels, gas_volume_mm3, sw_local,
+                 percolates, spanning_count, cluster_voxels,
                  volume_tiff, mask_tiff, domain_absolute, domain_gas, domain_water)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (run_id, scan_index, row["track_id"], row["connectivity"],
              row["z0"], row["z1"], row["y0"], row["y1"], row["x0"], row["x1"],
              row["extent_z"], row["extent_y"], row["extent_x"],
              row["gas_voxels_this_timestep"], row["gas_voxels_at_X"],
              row.get("brine_voxels"), row.get("gas_volume_mm3"), row.get("sw_local"),
+             row.get("percolates"), row.get("spanning_count"), row.get("cluster_voxels"),
              row["volume_tiff"], row["mask_tiff"],
              row["domain_absolute"], row["domain_gas"], row["domain_water"]),
         )
@@ -217,8 +267,9 @@ class PipelineDB:
                 (run_id, scan_index, label_id, track_id, connectivity, voxel_count,
                  crop_z0, crop_z1, crop_y0, crop_y1, crop_x0, crop_x1,
                  extent_z, extent_y, extent_x, volume_mm3,
-                 volume_tiff, mask_tiff, domain_absolute, domain_gas, domain_water)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 volume_tiff, mask_tiff, domain_absolute, domain_gas, domain_water,
+                 clustermask_raw, clustermask_z0, clustermask_z1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (run_id, scan_index, row["label_id"], row.get("track_id"), row["connectivity"],
              row["voxel_count"],
@@ -228,7 +279,56 @@ class PipelineDB:
              row["crop_extent_z_vox"], row["crop_extent_y_vox"], row["crop_extent_x_vox"],
              row.get("volume_mm3"),
              row["volume_tiff"], row["mask_tiff"],
-             row["domain_absolute"], row["domain_gas"], row["domain_water"]),
+             row["domain_absolute"], row["domain_gas"], row["domain_water"],
+             row.get("clustermask_raw"), row.get("clustermask_z0"), row.get("clustermask_z1")),
+        )
+
+    def insert_prior_work_provenance(
+        self, run_id: str, scan_file: str, steps: list[dict],
+        lattice=None, bbox=None, voxel_size=None,
+    ) -> None:
+        """Store the parsed Avizo HistoryLog chain for one .am file. Idempotent
+        per (run_id, scan_file): existing rows for this file are replaced.
+        voxel_size is (dz, dy, dx) in metres, extracted from bbox/(n-1)."""
+        import json
+        lz, ly, lx = (lattice if lattice else (None, None, None))
+        bbox_txt = " ".join(f"{v:.10g}" for v in bbox) if bbox else None
+        vdz, vdy, vdx = (voxel_size if voxel_size else (None, None, None))
+        self._con.execute(
+            "DELETE FROM prior_work_provenance WHERE run_id = ? AND scan_file = ?",
+            (run_id, scan_file),
+        )
+        for s in steps:
+            self._con.execute(
+                """
+                INSERT INTO prior_work_provenance
+                    (run_id, scan_file, step_order, module, label,
+                     avizo_version, step_date, parameters,
+                     lattice_z, lattice_y, lattice_x, bbox,
+                     voxel_dz_m, voxel_dy_m, voxel_dx_m)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, scan_file, s["order"], s.get("module"), s.get("label"),
+                 s.get("avizo_version"), s.get("date"),
+                 json.dumps(s.get("parameters", {})),
+                 lz, ly, lx, bbox_txt, vdz, vdy, vdx),
+            )
+
+    def update_percolation(
+        self, run_id: str, scan_index: int, track_id: int, connectivity: str,
+        percolates: bool, spanning_count: int, cluster_voxels: int,
+    ) -> None:
+        """Write percolation results into an existing fixed_boxes row. Called by
+        the viewer's "Check percolation" button after it runs cc3d for a
+        (track, scan)."""
+        self._con.execute(
+            """
+            UPDATE fixed_boxes
+               SET percolates = ?, spanning_count = ?, cluster_voxels = ?
+             WHERE run_id = ? AND scan_index = ? AND track_id = ? AND connectivity = ?
+            """,
+            (percolates, spanning_count, cluster_voxels,
+             run_id, scan_index, track_id, connectivity),
         )
 
     def close(self) -> None:
