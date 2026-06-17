@@ -12,7 +12,7 @@ class Config:
 
     gas_label: int = 2
     n_keep: int = 6
-    slab_depth: int = 128
+    slab_depth: int = 0      # 0 = auto-size from available RAM (see __post_init__)
     connectivities: tuple[int, ...] = (2,)
 
     crop_margin: int = 10
@@ -34,6 +34,37 @@ class Config:
     saturation_name_col: int = 0
     saturation_sg_col: int = 4
     saturation_time_col: int = 8
+
+    def __post_init__(self):
+        # Auto-size the CC slab depth from available RAM when left at 0.
+        # Bigger slabs = fewer passes = faster, but need more RAM for the int32
+        # label array. The meaningful win is reaching one pass (slab >= full Z),
+        # which removes boundary-stitching entirely; mid tiers use RAM smoothly.
+        #   < 24 GB free  -> 128   (laptop floor, proven safe)
+        #   24-48 GB      -> 256
+        #   48-96 GB      -> 512
+        #   96-192 GB     -> 1024
+        #   >= 192 GB     -> 4096  (>= full Z of 3780, single-pass cc3d)
+        if self.slab_depth == 0:
+            depth = 128
+            try:
+                import psutil
+                free_gb = psutil.virtual_memory().available / (1024 ** 3)
+                if free_gb >= 192:
+                    depth = 4096
+                elif free_gb >= 96:
+                    depth = 1024
+                elif free_gb >= 48:
+                    depth = 512
+                elif free_gb >= 24:
+                    depth = 256
+                else:
+                    depth = 128
+                print(f"[config] auto slab_depth={depth} (free RAM ~{free_gb:.0f} GB)")
+            except Exception:
+                print("[config] psutil not available — using default slab_depth=128")
+                depth = 128
+            object.__setattr__(self, "slab_depth", depth)
 
 
 CC3D_CONNECTIVITY = {1: 6, 2: 18, 3: 26}
