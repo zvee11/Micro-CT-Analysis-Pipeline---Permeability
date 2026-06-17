@@ -45,5 +45,8 @@ plotly
 matplotlib
 pillow                       # provides `PIL`
 
+# ---- System memory detection (auto slab_depth) ----
+psutil==6.1.1
+
 # NOTE: MPLBM-UT and MPI are not pip packages; install them separately on the
 # machine that runs the flow simulations (see README).
