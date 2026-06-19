@@ -159,6 +159,10 @@ def lbm_to_darcy(k_lbm: float, voxel_m: float) -> float:
 
 
 def get_voxel_m(con: duckdb.DuckDBPyConnection) -> float:
+    """Voxel edge length in metres, back-calculated from a stored
+    gas_volume_mm3 / gas_voxels (geometric mean of the voxel dimensions).
+    Falls back to the known acquisition voxel size if the DB has no usable row.
+    """
     row = con.execute("""
         SELECT gas_voxels, gas_volume_mm3
         FROM fixed_boxes
@@ -167,7 +171,9 @@ def get_voxel_m(con: duckdb.DuckDBPyConnection) -> float:
     """).fetchone()
     if row and row[0] and row[1]:
         return ((row[1] * 1e-9) / row[0]) ** (1 / 3)
-    return 6.651e-6  # fallback from your data
+    print("  WARNING: no usable gas_volume_mm3 in DB; using acquisition voxel "
+          "size 4.99684e-06 m. Verify this matches your data.")
+    return 4.99684e-6  # acquisition voxel size (extracted from .am, not nominal 5um)
 
 
 def resolve_win_path(relative_path: str, thesis_dir: Path) -> Path:
@@ -190,8 +196,8 @@ def load_jobs(con: duckdb.DuckDBPyConnection,
 
     Rules:
     - Skip scan_index 0 (dry scan, no gas/brine fluid)
-    - absolute: run once per track using scan_index 8 (timestep X)
-    - gas/water: run for scan_indices 1–7 (qualifying timesteps)
+    - absolute: run once per track at timestep X (the highest scan_index)
+    - gas/water: run for the qualifying timesteps (scan_index > 0, before/at X)
     - sample_mode: use a 50-slice Z crop of each domain
     """
     track_clause = (
@@ -218,15 +224,20 @@ def load_jobs(con: duckdb.DuckDBPyConnection,
            "domain_absolute","domain_gas","domain_water"]
     all_rows = [dict(zip(col, r)) for r in rows]
 
+    # Timestep X is the LAST (highest) scan_index present — that is where the
+    # percolating cluster and its frozen box are defined. It is data-dependent
+    # (NOT always 8), so derive it instead of hard-coding.
+    x_scan = max((r["scan_index"] for r in all_rows), default=None)
+
     jobs: list[dict] = []
     seen_abs: set[tuple] = set()
 
     for row in all_rows:
-        is_X = (row["scan_index"] == 8)
+        is_X = (row["scan_index"] == x_scan)
 
         for st in sim_types:
             if st == "absolute":
-                # Only run absolute once per track, at scan_index 8 (timestep X)
+                # Only run absolute once per track, at timestep X (highest scan)
                 if not is_X:
                     continue
                 abs_key = (row["run_id"], row["track_id"])
@@ -265,7 +276,7 @@ def load_jobs(con: duckdb.DuckDBPyConnection,
                 "sample_mode":   sample_mode,
                 "crop_z_start":  crop_z_start if sample_mode else 0,
                 "sample_z_slices": crop_z_slices if sample_mode else 50,
-                "scan_for_db":   row["scan_index"] if st != "absolute" else 8,
+                "scan_for_db":   row["scan_index"] if st != "absolute" else x_scan,
             })
 
     return jobs

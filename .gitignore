@@ -59,6 +59,7 @@ environment.yml
 # Old/archived material
 archive/
 report/
+safe/
 
 # Office temporary lock files
 ~$*

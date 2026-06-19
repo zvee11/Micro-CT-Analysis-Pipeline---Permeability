@@ -10,7 +10,7 @@ from scipy import ndimage as ndi
 
 from .config import CONNECTIVITY_NAME
 from .preprocessing import find_flow_crop_z
-from .simulation_domains import make_absolute_domain, make_gas_domain, make_water_domain
+from .simulation_domains import make_absolute_domain, make_gas_domain, make_water_domain, domain_filename
 
 if TYPE_CHECKING:
     from .db import PipelineDB
@@ -70,9 +70,10 @@ def save_outputs(
         # tiff.imwrite(vol_path, vol_crop, photometric="minisblack")
 
         all_gas_mask = (vol_crop == gas_label).astype(np.uint8)
-        abs_path = out_dir / f"cluster_{label_id:02d}_domain_absolute_{conn_name}.raw"
-        gas_path = out_dir / f"cluster_{label_id:02d}_domain_gas_{conn_name}.raw"
-        water_path = out_dir / f"cluster_{label_id:02d}_domain_water_{conn_name}.raw"
+        track_id = label_to_track.get(label_id)
+        abs_path = out_dir / domain_filename("absolute", track_id, scan_index, spacing, vol_crop.shape)
+        gas_path = out_dir / domain_filename("gas", track_id, scan_index, spacing, vol_crop.shape)
+        water_path = out_dir / domain_filename("water", track_id, scan_index, spacing, vol_crop.shape)
         make_absolute_domain(vol_crop).tofile(abs_path)
         make_gas_domain(vol_crop, all_gas_mask).tofile(gas_path)
         make_water_domain(vol_crop).tofile(water_path)
@@ -86,7 +87,6 @@ def save_outputs(
         clustermask.tofile(clustermask_path)
         cm_z0, cm_z1 = z0_bbox, z1_bbox - 1   # inclusive, full-volume coords
 
-        track_id = label_to_track.get(label_id)
         row = {
             "connectivity":      conn_name,
             "label_id":          label_id,

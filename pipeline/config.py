@@ -15,6 +15,8 @@ class Config:
     slab_depth: int = 0      # 0 = auto-size from available RAM (see __post_init__)
     connectivities: tuple[int, ...] = (2,)
 
+    prepass_workers: int = 8  # 1 = serial (laptop-safe); >1 = parallel decode in pre-pass
+
     crop_margin: int = 10
     inlet_outlet_threshold: float = 0.20  # min slice area as fraction of peak Z-slice
     track_clusters: bool = True
@@ -26,7 +28,7 @@ class Config:
 
     enable_ui: bool = True
     enable_pyvista: bool = True
-    pyvista_downsample: int = 4
+    pyvista_downsample: int = 2
     enable_dash: bool = False
     dash_port: int = 8050
 

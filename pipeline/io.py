@@ -40,17 +40,20 @@ def parse_codec_from_header(header: str) -> str:
 
 def parse_spacing_from_header(header: str, shape_zyx: tuple[int, int, int]) -> tuple[float, float, float] | None:
     z_len, y_len, x_len = shape_zyx
-    match = re.search(
+    matches = re.findall(
         r"BoundingBox\s+"
         r"([\-0-9\.Ee\+]+)\s+([\-0-9\.Ee\+]+)\s+"
         r"([\-0-9\.Ee\+]+)\s+([\-0-9\.Ee\+]+)\s+"
         r"([\-0-9\.Ee\+]+)\s+([\-0-9\.Ee\+]+)",
         header,
     )
-    if not match:
+    if not matches:
         return None
-    x0, x1, y0, y1, z0, z1 = map(float, match.groups())
-    return ((z1 - z0) / z_len, (y1 - y0) / y_len, (x1 - x0) / x_len)
+    x0, x1, y0, y1, z0, z1 = map(float, matches[-1])
+    
+    def _edge(extent: float, n: int) -> float:
+        return extent / (n-1) if n > 1 else extent
+    return (_edge(z1 - z0, z_len), _edge(y1 - y0, y_len), _edge(x1 - x0, x_len))
 
 
 def label_histogram(vol: np.ndarray) -> dict[int, int]:
@@ -102,7 +105,16 @@ def read_avizo(path: Path, parse_spacing: bool = True, memmap_raw: bool = True):
 
 
 def iter_input_files(cfg: Config) -> list[Path]:
-    files = sorted(cfg.data_dir.glob(cfg.input_glob))
+    def _scan_order(p: Path) -> tuple:
+        # Sort by the two leading integers in the filename (e.g. "10_0_..."),
+        # numerically, so 8_x comes before 10_x. Files that do not match this
+        # pattern fall back to lexicographic order after the numbered ones.
+        m = re.match(r"(\d+)_(\d+)", p.name)
+        if m:
+            return (0, int(m.group(1)), int(m.group(2)), p.name)
+        return (1, 0, 0, p.name)
+
+    files = sorted(cfg.data_dir.glob(cfg.input_glob), key=_scan_order)
     if not files:
         raise FileNotFoundError(f"No files found in {cfg.data_dir} matching {cfg.input_glob}")
     return files

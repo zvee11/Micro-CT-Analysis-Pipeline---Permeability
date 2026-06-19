@@ -10,6 +10,7 @@ from scipy import ndimage as ndi
 
 from .config import Config, CONNECTIVITY_NAME
 from .connected import topn_gas_cc
+from .simulation_domains import domain_filename
 from .db import PipelineDB, generate_run_id
 from .fixed_box import FrozenBox, apply_frozen_boxes, define_frozen_boxes
 from .io import read_avizo, iter_input_files
@@ -279,8 +280,8 @@ def main() -> None:
 
         if pv_vis is not None:
             for box in frozen_boxes[connectivity]:
-                gas_path = (out_dir_x / f"cluster_{box.label_id_at_X:02d}_domain_gas_{conn_name_x}.raw")
                 shape = (box.z1 - box.z0, box.y1 - box.y0, box.x1 - box.x0)
+                gas_path = out_dir_x / domain_filename("gas", box.track_id, X, spacing, shape)
                 pv_vis.register_cluster_at_X(
                     track_id=box.track_id, gas_domain_path=gas_path, shape=shape,
                     scan_index=X, spacing=spacing, origin=(box.z0, box.y0, box.x0),
@@ -354,9 +355,9 @@ def main() -> None:
             for connectivity in cfg.connectivities:
                 conn_name = CONNECTIVITY_NAME[connectivity]
                 for box in frozen_boxes.get(connectivity, []):
-                    gas_path = (cfg.out_dir / input_path.stem / conn_name
-                                / f"track_{box.track_id:02d}_domain_gas_{conn_name}.raw")
                     shape = (box.z1 - box.z0, box.y1 - box.y0, box.x1 - box.x0)
+                    gas_path = (cfg.out_dir / input_path.stem / conn_name
+                                / domain_filename("gas", box.track_id, scan_idx, spacing, shape))
                     pv_vis.register_cluster_at_scan(
                         track_id=box.track_id, gas_domain_path=gas_path,
                         shape=shape, scan_index=scan_idx,

@@ -11,6 +11,21 @@ from .config import Config
 from .io import label_histogram, read_avizo
 
 
+def _prepass_one(args: "tuple[int, Path, int]") -> "tuple[int, float, dict]":
+    """Decode one volume, return (idx, Sw, histogram). Runs in a worker process.
+    Top-level (not a closure) so it is importable under Windows 'spawn'."""
+    idx, path, gas_label = args
+    vol, _, _ = read_avizo(path, parse_spacing=False, memmap_raw=False)
+    hist = label_histogram(vol)
+    del vol
+    gc.collect()
+    brine = hist.get(1, 0)
+    gas = hist.get(gas_label, 0)
+    total = brine + gas
+    sw = (brine / total) if total > 0 else float("nan")
+    return idx, sw, hist
+
+
 def compute_sw_series(
     input_files: list[Path],
     cfg: Config,
@@ -18,36 +33,49 @@ def compute_sw_series(
     on_file_start: "Callable[[int, str], None] | None" = None,
     on_file_done: "Callable[[int, str, float], None] | None" = None,
 ) -> tuple[list[float], list[dict[int, int]]]:
-    """Pre-pass: per file compute Sw = brine/(brine+gas) and the label histogram."""
-    sw_series: list[float] = []
-    hist_series: list[dict[int, int]] = []
+    """Pre-pass: per file compute Sw = brine/(brine+gas) and the label histogram.
 
-    for idx, path in enumerate(input_files, start=1):
-        logger.info("pre-pass %d/%d: %s", idx, len(input_files), path.name)
-        if on_file_start:
-            on_file_start(idx - 1, path.name)
+    Serial when cfg.prepass_workers == 1 (laptop-safe: one volume in RAM at a
+    time). With prepass_workers > 1, decodes run in a process pool — each worker
+    holds one full volume, so only raise this on a high-RAM machine. Results are
+    placed by file index, so the output is identical to the serial path
+    regardless of worker count or completion order.
+    """
+    n = len(input_files)
+    sw_series: list[float] = [float("nan")] * n
+    hist_series: list[dict[int, int]] = [{} for _ in range(n)]
+    workers = max(1, int(getattr(cfg, "prepass_workers", 1)))
 
-        vol, _, _ = read_avizo(path, parse_spacing=False, memmap_raw=False)
-        hist = label_histogram(vol)
-        hist_series.append(hist)
-
-        brine = hist.get(1, 0)
-        gas = hist.get(cfg.gas_label, 0)
-        total = brine + gas
-        if total == 0:
+    def _record(idx: int, sw: float, hist: dict) -> None:
+        sw_series[idx] = sw
+        hist_series[idx] = hist
+        path = input_files[idx]
+        if np.isnan(sw):
             logger.warning("no brine or gas voxels found in %s — Sw set to NaN", path.name)
-            sw = float("nan")
-        else:
-            sw = brine / total
-        sw_series.append(sw)
-
-        del vol
-        gc.collect()
-
         logger.info("pre-pass %d/%d done | Sw=%.4f | %s",
-                    idx, len(input_files), sw if not np.isnan(sw) else -1, path.name)
+                    idx + 1, n, sw if not np.isnan(sw) else -1, path.name)
         if on_file_done:
-            on_file_done(idx - 1, path.name, sw)
+            on_file_done(idx, path.name, sw)
+
+    if workers == 1:
+        for idx, path in enumerate(input_files):
+            logger.info("pre-pass %d/%d: %s", idx + 1, n, path.name)
+            if on_file_start:
+                on_file_start(idx, path.name)
+            _, sw, hist = _prepass_one((idx, path, cfg.gas_label))
+            _record(idx, sw, hist)
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        logger.info("pre-pass: parallel decode with %d workers", workers)
+        if on_file_start:
+            for idx, path in enumerate(input_files):
+                on_file_start(idx, path.name)
+        tasks = [(idx, path, cfg.gas_label) for idx, path in enumerate(input_files)]
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_prepass_one, t) for t in tasks]
+            for fut in as_completed(futures):
+                idx, sw, hist = fut.result()
+                _record(idx, sw, hist)
 
     logger.info("Sw series: %s",
                 ", ".join(f"{sw:.4f}" if not np.isnan(sw) else "NaN" for sw in sw_series))

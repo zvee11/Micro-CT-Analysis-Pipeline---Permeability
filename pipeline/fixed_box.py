@@ -10,7 +10,7 @@ import tifffile as tiff
 
 from .config import Config, CONNECTIVITY_NAME
 from .preprocessing import find_flow_crop_z, compute_cluster_cog
-from .simulation_domains import make_absolute_domain, make_gas_domain, make_water_domain
+from .simulation_domains import make_absolute_domain, make_gas_domain, make_water_domain, domain_filename
 
 if TYPE_CHECKING:
     from .db import PipelineDB
@@ -143,9 +143,9 @@ def apply_frozen_boxes(
 
         results[box.track_id] = (gas_count, sw_local, cog_global, cluster_z_extent)
 
-        abs_path = out_dir / f"track_{box.track_id:02d}_domain_absolute_{conn_name}.raw"
-        gas_path = out_dir / f"track_{box.track_id:02d}_domain_gas_{conn_name}.raw"
-        water_path = out_dir / f"track_{box.track_id:02d}_domain_water_{conn_name}.raw"
+        abs_path = out_dir / domain_filename("absolute", box.track_id, scan_index, spacing, vol_slice.shape)
+        gas_path = out_dir / domain_filename("gas", box.track_id, scan_index, spacing, vol_slice.shape)
+        water_path = out_dir / domain_filename("water", box.track_id, scan_index, spacing, vol_slice.shape)
         make_absolute_domain(vol_slice).tofile(abs_path)
         make_gas_domain(vol_slice, gas_mask).tofile(gas_path)
         make_water_domain(vol_slice).tofile(water_path)

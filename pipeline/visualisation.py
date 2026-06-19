@@ -248,6 +248,9 @@ class PyVistaVisualiser:
         # Per-track percolation results computed by the button:
         # {track_id: {scan_index: {"percolates": bool, "mesh": pv.PolyData|None}}}
         self._percolation: dict[int, dict] = {}
+        # Names of the per-component spanning actors currently on screen, so the
+        # next redraw can remove them (their count varies scan to scan).
+        self._spanning_actor_names: list[str] = []
 
     def register_cluster_at_X(self, track_id, gas_domain_path, shape, scan_index,
                               spacing=None, origin=(0, 0, 0), clustermask=None) -> None:
@@ -304,6 +307,10 @@ class PyVistaVisualiser:
             pl.remove_actor("iso")
             pl.remove_actor("gas")
             pl.remove_actor("box")
+            # Remove any spanning-component actors drawn on the previous redraw.
+            for _name in list(self._spanning_actor_names):
+                pl.remove_actor(_name)
+            self._spanning_actor_names = []
 
             # Percolation result for this (track, scan), if the button computed it.
             perc = self._percolation.get(tid, {}).get(scan_idx)
@@ -326,10 +333,29 @@ class PyVistaVisualiser:
                 if iso_mesh is not None:
                     pl.add_mesh(iso_mesh, color=_track_colour(tid), opacity=0.95,
                                 smooth_shading=True, name="iso")
-            # Non-X: if the button found a spanning component, highlight it high-opacity.
-            elif perc is not None and perc["percolates"] and perc["mesh"] is not None:
-                pl.add_mesh(perc["mesh"], color=_track_colour(tid), opacity=0.95,
-                            smooth_shading=True, name="iso")
+            # Non-X: if the button found spanning components, draw EACH of them.
+            # The X route (matched to timestep X by inlet/outlet footprint) is
+            # amber; the other percolating paths are a distinct colour. Trapped
+            # (non-spanning) gas remains in the low-opacity context layer above.
+            elif perc is not None and perc["percolates"]:
+                spanning_meshes = perc.get("spanning_meshes") or []
+                if spanning_meshes:
+                    for i, (m, this_is_x) in enumerate(spanning_meshes):
+                        if m is None:
+                            continue
+                        if this_is_x:
+                            colour, opacity = "#FFD54F", 0.95   # amber: the X route
+                        else:
+                            colour, opacity = "#42A5F5", 0.85   # blue: other spanning paths
+                        name = f"span_{i}"
+                        pl.add_mesh(m, color=colour, opacity=opacity,
+                                    smooth_shading=True, name=name)
+                        self._spanning_actor_names.append(name)
+                elif perc.get("mesh") is not None:
+                    # Fallback (older result without per-component list).
+                    colour = "#FFD54F" if perc.get("is_x_route") else _track_colour(tid)
+                    pl.add_mesh(perc["mesh"], color=colour, opacity=0.95,
+                                smooth_shading=True, name="iso")
 
             box = None
             if shape is not None:
@@ -413,6 +439,56 @@ class PyVistaVisualiser:
             print(f"  PyVista gas-mesh error for {gas_domain_path.name}: {e}")
             return None
 
+    @staticmethod
+    def _face_footprints(component: np.ndarray) -> "tuple[set, set]":
+        """(inlet, outlet) footprints of a boolean component: the (y,x) pixels
+        it occupies on the z=0 and z=max faces."""
+        inlet = set(map(tuple, np.argwhere(component[0])))
+        outlet = set(map(tuple, np.argwhere(component[-1])))
+        return inlet, outlet
+
+    @staticmethod
+    def _overlap(a: set, b: set) -> float:
+        """Jaccard overlap of two pixel sets; 0 if both empty."""
+        if not a and not b:
+            return 0.0
+        union = len(a | b)
+        return (len(a & b) / union) if union else 0.0
+
+    def _x_route_footprints(self, tid):
+        """Compute and cache the original X route's inlet/outlet footprints and
+        CoG for track `tid`, from the X gas domain. Returns dict or None.
+
+        The X route is the largest component of the X gas domain that spans both
+        Z-faces — the same selection the pipeline used at X. Later scans are
+        matched against this footprint, not re-derived, so 'same route' means
+        'pierces the inlet/outlet at the same pixels as X did'."""
+        info = self._clusters.get(tid, {})
+        if "_x_route" in info:
+            return info["_x_route"]
+        shape = info.get("shape")
+        x_path = info.get("gas_path_X")
+        out = None
+        if shape is not None and x_path is not None and Path(x_path).exists():
+            import cc3d
+            raw = np.fromfile(str(x_path), dtype=np.uint8)
+            if raw.size == int(np.prod(shape)):
+                gas = (raw.reshape(shape) == 0)
+                if gas.any():
+                    labels = cc3d.connected_components(gas.astype(np.uint8), connectivity=26)
+                    inlet = set(np.unique(labels[0])) - {0}
+                    outlet = set(np.unique(labels[-1])) - {0}
+                    spanning = inlet & outlet
+                    if spanning:
+                        chosen = max(spanning, key=lambda c: int((labels == c).sum()))
+                        comp = (labels == chosen)
+                        fin, fout = self._face_footprints(comp)
+                        cog = tuple(float(v) for v in np.argwhere(comp).mean(axis=0))
+                        out = {"inlet": fin, "outlet": fout, "cog": cog}
+                    del labels
+        self._clusters.setdefault(tid, {})["_x_route"] = out
+        return out
+
     def _compute_percolation_for_track(self, tid):
         """Button worker. For the current track, over all NON-X scans:
         load the scan's gas .raw, run cc3d at FULL resolution, take the largest
@@ -449,19 +525,66 @@ class PyVistaVisualiser:
                 gas_full = (raw.reshape(shape) == 0)  # FULL res, gas==0 in domain .raw
 
                 percolates, spanning_count, cluster_voxels, mesh = False, 0, 0, None
+                is_x_route = False
+                spanning_meshes = []  # list of (mesh, is_x_route) for ALL spanning components
                 if gas_full.any():
                     labels = cc3d.connected_components(gas_full.astype(np.uint8), connectivity=26)
                     inlet = set(np.unique(labels[0])) - {0}
                     outlet = set(np.unique(labels[-1])) - {0}
                     spanning = inlet & outlet
                     if spanning:
-                        chosen = max(spanning, key=lambda c: int((labels == c).sum()))
-                        component = (labels == chosen)
                         percolates = True
                         spanning_count = len(spanning)
+                        x_route = self._x_route_footprints(tid)
+                        # Score each spanning component by inlet+outlet footprint
+                        # overlap with the original X route. STRICT: only the
+                        # best-overlapping component, and only if overlap > 0, is
+                        # marked as the X route. If the original route has pinched
+                        # off, nothing here is the X route (is_x_route stays False)
+                        # even though some other path still spans.
+                        scored = []  # (component_label, score)
+                        best_c, best_score = None, -1.0
+                        for c in spanning:
+                            comp_c = (labels == c)
+                            if x_route is not None:
+                                fin, fout = self._face_footprints(comp_c)
+                                score = (self._overlap(fin, x_route["inlet"])
+                                         + self._overlap(fout, x_route["outlet"]))
+                            else:
+                                score = float(int(comp_c.sum()))
+                            scored.append((c, score))
+                            if score > best_score:
+                                best_c, best_score = c, score
+
+                        # The X route is the best match, only if it overlaps at all.
+                        x_label = best_c if (x_route is not None and best_score > 0.0) else None
+                        is_x_route = x_label is not None
+
+                        # Build a display mesh for EVERY spanning component, tagging
+                        # the one that is the X route. The X route's voxel count is
+                        # the one written to the DB (the kr-relevant cluster); if no
+                        # component matches X, fall back to the largest spanning one.
+                        chosen = best_c
+                        component = (labels == chosen)
                         cluster_voxels = int(component.sum())
-                        # downsample ONLY for the display mesh
-                        mesh = self._mesh_from_bool(component[::d, ::d, ::d], d, origin)
+                        for c, score in scored:
+                            comp_c = (labels == c)
+                            this_is_x = (c == x_label)
+                            m = self._mesh_from_bool(comp_c[::d, ::d, ::d], d, origin)
+                            if m is not None:
+                                spanning_meshes.append((m, this_is_x))
+                            if this_is_x:
+                                mesh = m  # keep the X-route mesh as the primary 'mesh'
+
+                        if mesh is None and spanning_meshes:
+                            mesh = spanning_meshes[0][0]  # no X match: show largest as primary
+
+                        if x_route is not None:
+                            cog = np.argwhere(component).mean(axis=0)
+                            cog_dist = float(np.linalg.norm(cog - np.array(x_route["cog"])))
+                            print(f"  [match] track {tid:02d} scan {scan_idx}: "
+                                  f"spanning={spanning_count} x_route_overlap={best_score:.3f} "
+                                  f"cog_dist={cog_dist:.1f}vox is_x_route={is_x_route}")
                     del labels
                 del gas_full, raw
 
@@ -476,7 +599,10 @@ class PyVistaVisualiser:
                     except Exception as e:
                         print(f"  [percolation] DB write failed (scan {scan_idx}): {e}")
 
-                self._percolation[tid][scan_idx] = {"percolates": percolates, "mesh": mesh}
+                self._percolation[tid][scan_idx] = {
+                    "percolates": percolates, "mesh": mesh, "is_x_route": is_x_route,
+                    "spanning_meshes": spanning_meshes,
+                }
                 print(f"  [percolation] track {tid:02d} scan {scan_idx}: "
                       f"percolates={percolates} spanning={spanning_count} voxels={cluster_voxels}")
                 _gc.collect()
