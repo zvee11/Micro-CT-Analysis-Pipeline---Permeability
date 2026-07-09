@@ -136,27 +136,69 @@ def _select_regime_cutoff_terminal(triples, bp1, bp2, slopes, auto_cutoff,
     # ---- ASCII scatter: Sw axis fixed to the full physical range 0..1 ----
     # The origin (scan index -1, Sw=0 at time 0) is shown as 'O'. The Sw axis is
     # the full 0..1 so the whole displacement trajectory is visible.
+    # The horizontal axis is PROPORTIONAL to the x-values (time/PV) — the same
+    # axis the piecewise fit runs in — not one uniform column per scan. Vertical
+    # ':' guides mark the two automatic breakpoints (bp1, bp2).
     H = 21                               # 0.00, 0.05, ... 1.00
+    W = 66                               # plot width in character columns
     SW_LO, SW_HI = 0.0, 1.0
     rng = SW_HI - SW_LO
-    grid = [[" "] * len(triples) for _ in range(H)]
-    for col, (xv, sw, sc) in enumerate(triples):
+    x_max = max(xs)
+    x_span = x_max if x_max > 0 else 1.0
+
+    def x_to_col(xv: float) -> int:
+        return max(0, min(W - 1, int(round(xv / x_span * (W - 1)))))
+
+    grid = [[" "] * W for _ in range(H)]
+
+    # Breakpoint guides first, so data points overwrite them
+    for bp in (bp1, bp2):
+        if 0.0 <= bp <= x_max:
+            c = x_to_col(bp)
+            for r in range(H):
+                grid[r][c] = ":"
+
+    for xv, sw, sc in triples:
         row = int(round((1 - (sw - SW_LO) / rng) * (H - 1)))
         row = max(0, min(H - 1, row))
-        grid[row][col] = "O" if sc < 0 else seg_char[seg_of(xv)]
+        col = x_to_col(xv)
+        ch = "O" if sc < 0 else seg_char[seg_of(xv)]
+        if grid[row][col] not in (" ", ":"):
+            # collision: nudge one column right, then left; else overwrite
+            if col + 1 < W and grid[row][col + 1] in (" ", ":"):
+                col += 1
+            elif col - 1 >= 0 and grid[row][col - 1] in (" ", ":"):
+                col -= 1
+        grid[row][col] = ch
+
+    # X-axis with ticks at 0, 1/4, 1/2, 3/4 and max of the x range
+    axis = ["-"] * W
+    tick_xs = [x_span * f for f in (0.25, 0.5, 0.75, 1.0)]
+    for tx in tick_xs:
+        axis[x_to_col(tx)] = "+"
+    tick_row = [" "] * W
+    tick_row[0] = "0"
+    for tx in tick_xs:
+        lbl = f"{tx:.0f}"
+        c = x_to_col(tx)
+        start = max(0, min(W - len(lbl), c - len(lbl) // 2))
+        for k, ch in enumerate(lbl):
+            tick_row[start + k] = ch
 
     print("\n" + "=" * 70)
     print("  REGIME CUTOFF SELECTION   (Sw vs time/PV, steady injection)")
     print("=" * 70)
     print(f"  Sw axis: {SW_HI:.2f} (top) .. {SW_LO:.2f} (bottom)   "
           f"O=origin  D=displacement  T=transition  x=dissolution")
-    print("  " + "-" * (len(triples) * 3 + 8))
+    print(f"  x axis: {x_unit} 0 .. {x_max:.0f} (proportional)   "
+          f"':' = auto breakpoints")
+    print("  " + "-" * (W + 8))
     for r in range(H):
         sw_lab = SW_HI - (r / (H - 1)) * rng
-        print(f"  {sw_lab:4.2f} |" + "".join(f" {c} " for c in grid[r]))
-    print("       +" + "".join(" - " for _ in triples))
-    print("  idx -> " + "".join(f"{('O' if sc < 0 else str(sc)):>2} " for sc in scans))
-    print("  " + "-" * (len(triples) * 3 + 8))
+        print(f"  {sw_lab:4.2f} |" + "".join(grid[r]))
+    print("       +" + "".join(axis))
+    print("        " + "".join(tick_row))
+    print("  " + "-" * (W + 8))
 
     # ---- value table with segment + auto-cutoff marker ----
     print(f"  {'idx':>3} {'time/PV':>9} {'Sw':>8}  {'segment':>13}  marker")
