@@ -19,9 +19,9 @@ e.g. domain_gas_02-8_4.99676um_8bu_750x750x273.raw
 
 Usage:
     python run_geodict_batch.py ^
-        --output-root  "C:\\...\\Micro-CT-Analysis-Pipeline\\output" ^
+        --output-root  "C:\\...\\output" ^
         --geodict-exe  "C:\\Program Files\\Math2Market GmbH\\GeoDict 2026\\geodict2026.exe" ^
-        --macro        "C:\\...\\geodict_lir_job.py" ^
+        --macro        "C:\\...\\scripts\\geodict_lir_job.py" ^
         --result-root  "C:\\...\\results_geodict" ^
         --db           "C:\\...\\results.duckdb" ^
         --run-id       <run_id> ^
