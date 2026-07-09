@@ -151,6 +151,10 @@ def main() -> None:
         logger.info("no saturation_file configured — using scan index for regime detection")
 
     x_values = elapsed_minutes if elapsed_minutes else None
+
+    if ui and getattr(cfg, "interactive_regime", False):
+        ui.stop()
+
     X = detect_regime_boundary(sw_series, cfg, logger, x_values=x_values)
     qualifying_files = [all_files[i] for i in range(n_total) if i <= X]
     n_q = len(qualifying_files)

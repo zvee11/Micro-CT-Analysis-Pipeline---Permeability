@@ -11,7 +11,7 @@ class Config:
     input_glob: str = "*.am"
 
     gas_label: int = 2
-    n_keep: int = 6
+    n_keep: int = 8
     slab_depth: int = 0      # 0 = auto-size from available RAM (see __post_init__)
     connectivities: tuple[int, ...] = (2,)
 
@@ -21,8 +21,10 @@ class Config:
     inlet_outlet_threshold: float = 0.20  # min slice area as fraction of peak Z-slice
     track_clusters: bool = True
 
-    regime_cutoff: str = "transition"      # "transition" (default) | "displacement"
-    min_scans_three_segment: int = 6
+    regime_cutoff: str = "displacement"      # "transition" (default) | "displacement"
+    min_scans_three_segment: int = 3
+    interactive_regime: bool = True        # prompt user to confirm/override the
+                                           # regime cutoff; False skips the prompt
 
     crop_mode: str = "fixed"
 
@@ -32,10 +34,10 @@ class Config:
     enable_dash: bool = False
     dash_port: int = 8050
 
-    saturation_file: str = "data/18_Sg_3d.xlsx"  # empty to skip reference comparison
+    saturation_file: str = "data/Sg_3d_H2_19.xlsx"  # empty to skip reference comparison
     saturation_name_col: int = 0
-    saturation_sg_col: int = 4
-    saturation_time_col: int = 8
+    saturation_sg_col: int = 8
+    saturation_time_col: int = 4
 
     def __post_init__(self):
         # Auto-size the CC slab depth from available RAM when left at 0.

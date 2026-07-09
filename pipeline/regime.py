@@ -111,6 +111,96 @@ def _piecewise_linear_3seg(x: np.ndarray, y: np.ndarray) -> tuple[float, float, 
     return bp1, bp2, [s1, s2, s3]
 
 
+def _select_regime_cutoff_terminal(triples, bp1, bp2, slopes, auto_cutoff,
+                                   x_unit, regime_cutoff, logger):
+    """Draw the Sw-vs-time(=PV) curve as an ASCII plot in the terminal, show a
+    table of values with the three regime segments marked, and let the user type
+    the cutoff timestep. No GUI / matplotlib needed, so it always works over RDP.
+
+    Returns the chosen cutoff x-value; falls back to the automatic value on empty
+    or invalid input.
+    """
+    xs = [t[0] for t in triples]
+    sws = [t[1] for t in triples]
+    scans = [t[2] for t in triples]
+
+    def seg_of(x):
+        if x <= bp1:
+            return 0      # displacement
+        if x <= bp2:
+            return 1      # transition
+        return 2          # dissolution
+    seg_char = ["D", "T", "x"]          # marker per segment
+    seg_name = ["displacement", "transition", "dissolution"]
+
+    # ---- ASCII scatter: Sw axis fixed to the full physical range 0..1 ----
+    # The origin (scan index -1, Sw=0 at time 0) is shown as 'O'. The Sw axis is
+    # the full 0..1 so the whole displacement trajectory is visible.
+    H = 21                               # 0.00, 0.05, ... 1.00
+    SW_LO, SW_HI = 0.0, 1.0
+    rng = SW_HI - SW_LO
+    grid = [[" "] * len(triples) for _ in range(H)]
+    for col, (xv, sw, sc) in enumerate(triples):
+        row = int(round((1 - (sw - SW_LO) / rng) * (H - 1)))
+        row = max(0, min(H - 1, row))
+        grid[row][col] = "O" if sc < 0 else seg_char[seg_of(xv)]
+
+    print("\n" + "=" * 70)
+    print("  REGIME CUTOFF SELECTION   (Sw vs time/PV, steady injection)")
+    print("=" * 70)
+    print(f"  Sw axis: {SW_HI:.2f} (top) .. {SW_LO:.2f} (bottom)   "
+          f"O=origin  D=displacement  T=transition  x=dissolution")
+    print("  " + "-" * (len(triples) * 3 + 8))
+    for r in range(H):
+        sw_lab = SW_HI - (r / (H - 1)) * rng
+        print(f"  {sw_lab:4.2f} |" + "".join(f" {c} " for c in grid[r]))
+    print("       +" + "".join(" - " for _ in triples))
+    print("  idx -> " + "".join(f"{('O' if sc < 0 else str(sc)):>2} " for sc in scans))
+    print("  " + "-" * (len(triples) * 3 + 8))
+
+    # ---- value table with segment + auto-cutoff marker ----
+    print(f"  {'idx':>3} {'time/PV':>9} {'Sw':>8}  {'segment':>13}  marker")
+    auto_scan = None
+    for xv, sw, sc in triples:
+        mark = ""
+        if abs(xv - auto_cutoff) < 1e-6 and sc >= 0:
+            mark = "<-- AUTO cutoff"
+            auto_scan = sc
+        idx_lbl = "O" if sc < 0 else str(sc)
+        seg_lbl = "origin" if sc < 0 else seg_name[seg_of(xv)]
+        print(f"  {idx_lbl:>3} {xv:>9.1f} {sw:>8.4f}  {seg_lbl:>13}  {mark}")
+    print("  " + "-" * 66)
+    print(f"  slopes: displacement={slopes[0]:.4f}  transition={slopes[1]:.4f}  "
+          f"dissolution={slopes[2]:.4f}")
+    print(f"  auto breakpoints: bp1={bp1:.0f}{x_unit} (D->T), bp2={bp2:.0f}{x_unit} (T->x)")
+    print(f"  (origin O=(0,0) is a fixed boundary condition for the fit, not "
+          f"a selectable timestep)")
+    print(f"  regime_cutoff='{regime_cutoff}' -> AUTO cutoff = timestep {auto_scan} "
+          f"(x={auto_cutoff:.0f}{x_unit})")
+    print("=" * 70)
+
+    # ---- prompt (only real scans, sc >= 0, are selectable) ----
+    try:
+        resp = input("  Enter cutoff timestep index [Enter = accept AUTO]: ").strip()
+    except EOFError:
+        resp = ""
+    if resp == "":
+        logger.info("user accepted AUTO regime cutoff (timestep %s)", auto_scan)
+        return auto_cutoff
+    try:
+        chosen = int(resp)
+    except ValueError:
+        logger.warning("'%s' is not an integer; using AUTO cutoff.", resp)
+        return auto_cutoff
+    match = [xv for (xv, sw, sc) in triples if sc == chosen and sc >= 0]
+    if not match:
+        logger.warning("timestep %d not a selectable scan; using AUTO cutoff.", chosen)
+        return auto_cutoff
+    logger.info("user set regime cutoff to timestep %d (x=%.1f%s)",
+                chosen, match[0], x_unit)
+    return match[0]
+
+
 def detect_regime_boundary(
     sw_series: list[float],
     cfg: Config,
@@ -134,6 +224,12 @@ def detect_regime_boundary(
             xv = float(i)
         triples.append((xv, sw, i))
 
+    # Add the physical boundary condition at the origin: at time 0, before any
+    # injection, Sw = 0. This is a real constraint on the displacement slope, so
+    # it feeds the fit. It is NOT a real scan, so it carries scan index -1 and is
+    # never selectable as a cutoff nor counted as a qualifying timestep.
+    fit_triples = [(0.0, 0.0, -1)] + triples
+
     n = len(triples)
     if n < cfg.min_scans_three_segment:
         x_label = "minutes" if x_values is not None else "scans"
@@ -144,8 +240,8 @@ def detect_regime_boundary(
         )
         return len(sw_series) - 1
 
-    xs = np.array([t[0] for t in triples], dtype=float)
-    sw_vals = np.array([t[1] for t in triples], dtype=float)
+    xs = np.array([t[0] for t in fit_triples], dtype=float)
+    sw_vals = np.array([t[1] for t in fit_triples], dtype=float)
 
     bp1, bp2, slopes = _piecewise_linear_3seg(xs, sw_vals)
     x_unit = "min" if x_values is not None else "scan"
@@ -154,6 +250,15 @@ def detect_regime_boundary(
 
     cutoff_x = bp1 if cfg.regime_cutoff == "displacement" else bp2
     logger.info("regime_cutoff=%s: using breakpoint %.1f%s as X", cfg.regime_cutoff, cutoff_x, x_unit)
+
+    # ---- user interjection: choose the regime cutoff in the terminal ----
+    # Injection is at a steady rate, so time (minutes) is proportional to injected
+    # pore volumes; the x-axis here is therefore equivalent to PV. An ASCII plot
+    # and table are printed in the terminal (no GUI needed, works over RDP) and
+    # the user types the cutoff timestep. Skipped when interactive_regime=False.
+    if getattr(cfg, "interactive_regime", False):
+        cutoff_x = _select_regime_cutoff_terminal(
+            fit_triples, bp1, bp2, slopes, cutoff_x, x_unit, cfg.regime_cutoff, logger)
 
     qualifying_scan_ids = [scan_i for (xv, sw, scan_i) in triples if xv <= cutoff_x]
     if not qualifying_scan_ids:

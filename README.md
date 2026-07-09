@@ -1,141 +1,34 @@
-# Micro-CT Pore-Scale Analysis Pipeline
+# Micro-CT Permeability Project — Sorted
 
-Automated data-management and analysis pipeline for time-resolved micro-CT
-volumes of porous rock, for underground hydrogen storage research. The pipeline
-ingests segmented Avizo/Amira volumes, detects saturation regimes, extracts and
-tracks connected gas clusters, builds pore-scale flow-simulation domains, and
-records every intermediate product in an embedded DuckDB database.
+Assembled from all 5 archives (all-zip-local, all-zip, full-zip, repo, semi-archive).
+NO code logic was changed. The ONLY code edit is one default-path string in
+geodict_flowsim.py (--macro now points to scripts/geodict_lir_job.py). All 113 .py
+files were syntax-checked after sorting.
 
----
+## Buckets
+- pipeline/             CORE — git `main`. Live package, geodict_flowsim batch runner,
+                        validation, notebooks, scripts (incl. geodict_lir_job macro),
+                        visualization, current DB. Has .gitignore + output/ & data/ READMEs.
+- useful_but_outdated/  Older but runnable versions (rollback/diff). git-ignored.
+- _archive/             Dead/reference: pre-pipeline experiments, 2025 scan_tool scripts,
+                        old CSV exports, misc refs. git-ignored.
+- report/               Thesis material (built on disk for you; NOT in the delivery zip,
+                        git-ignored): main.tex, 18 figures, references, presentations,
+                        notes (incl. THE FILES.docx + midterm feedback), admin.
 
-## Repository contents
+## The one code change (geodict_flowsim.py, line 437)
+  BEFORE: default=r"...\Micro-CT-Analysis-Pipeline\geodict_lir_job.py"
+  AFTER:  default=r"...\Micro-CT-Analysis-Pipeline\scripts\geodict_lir_job.py"
+This is the single edit needed so the batch runner finds the single-domain macro now
+that it lives in scripts/. geodict_lir_job.py itself was NOT changed.
 
-```
-pipeline/              The analysis pipeline (Python package)
-solve.py               Interactive launcher for MPLBM-UT flow simulations (WSL/Linux)
-viewer.py              Standalone 3D PyVista cluster viewer
-check.py               Quick Avizo-file codec/shape check utility
-validation/            Scripts comparing pipeline output against Avizo/manual results
-visualization/         Standalone plotting/visualisation scripts
-requirements.txt       Python dependencies
-.gitignore             Excludes data, outputs, database, and virtual environments
-```
+## On NAS (excluded by .gitignore, not in tree)
+  results_geodict/ (215 GeoDict job macros + logs), *.am volumes, Sg_3d_H2_19.xlsx,
+  results-H2-19 / Vol_Frac3d raw CSVs, and the 5.4 GB compare-avizo-and-cca data.
 
-Not in the repository (excluded by `.gitignore`, kept locally on each machine):
-`data/` (input `.am` volumes and the reference saturation spreadsheet),
-`output/` (generated domains and images), `results.duckdb` (generated database),
-and the virtual environment.
+## Figures
+  18 of the 26 figures main.tex references are in report/figures/. The other 8
+  (4 concept diagrams + 4 _disp sensitivity figures) are sourced from Overleaf and
+  left untouched per your instruction.
 
----
-
-## Requirements
-
-- **Python 3.10 or newer** (the code uses `X | Y` type unions and
-  `from __future__ import annotations`).
-- The Python packages in `requirements.txt`.
-- **For flow simulation only:** a Linux environment with MPLBM-UT and an MPI
-  runtime installed. On Windows this is provided through WSL; on a Linux
-  workstation it runs natively. The geometry pipeline itself does **not** need
-  MPLBM-UT or MPI.
-
----
-
-## Setting up the environment
-
-The virtual environment is intentionally **not** committed to Git (it is large
-and machine-specific). This project was built with **pip**, not conda — use pip
-on every machine so the environment matches. Recreate it on each machine:
-
-```bash
-# from the repository root
-python -m venv .venv
-
-# activate it:
-source .venv/bin/activate        # Linux / WSL / macOS
-# .venv\Scripts\activate         # Windows PowerShell/CMD
-
-pip install --upgrade pip
-pip install -r requirements.lock.txt
-```
-
-Two requirements files are provided:
-
-- **`requirements.lock.txt`** — exact pinned versions from a known-working
-  environment, trimmed to only what this codebase imports (pipeline core +
-  PyVista viewer + Dash dashboard). **Use this to install.**
-- **`requirements.txt`** — human-readable list of direct dependencies and why
-  each is needed.
-
-The lock file keeps the PyVista 3D viewer and the Dash dashboard. It includes
-`PyQt5` and `vtk`, which the PyVista background plotter needs — these require a
-graphical display (or an X/VNC session) and OpenGL. If you run the workstation
-**headlessly** (terminal only), the geometry pipeline and simulations still work,
-but the interactive 3D viewer will not open; do that visualisation on a machine
-with a display.
-
-MPLBM-UT and MPI are **not** pip packages. Install them separately on the
-machine that runs the flow simulations, the same way they are set up under WSL.
-
----
-
-## Local data layout
-
-The pipeline reads from `data/` and writes to `output/`, relative to the
-directory you run it from (see `pipeline/config.py`). On each machine, create:
-
-```
-<project root>/
-├── data/                     # place input .am volumes here
-│   ├── *.am
-│   └── 18_Sg_3d.xlsx         # reference saturation file (see config.py)
-├── output/                   # created by the pipeline
-└── results.duckdb            # created by the pipeline
-```
-
-Paths and all other parameters live in `pipeline/config.py` — edit there, not in
-the code. Key settings include the gas label, number of clusters to keep,
-connectivity, crop mode, regime-cutoff policy, and the reference-saturation file
-path and column indices.
-
----
-
-## Running the pipeline
-
-**Geometry pipeline** (ingestion, regime detection, clustering, domain
-construction, database population):
-
-```bash
-python -m pipeline
-```
-
-**Flow simulations** (run after the geometry pipeline has populated the database;
-requires the Linux/MPLBM-UT environment). Run from the directory containing
-`results.duckdb`:
-
-```bash
-python solve.py
-```
-
-`solve.py` auto-detects the WSL/Linux username and uses the MPLBM-UT, virtual
-environment, and working-directory locations defined at the top of the file
-(`WSL_MPLBM_DIR`, `WSL_VENV`, `WSL_WORK_DIR`) — adjust those constants if your
-workstation differs from the default layout.
-
-**3D viewer** (after a run):
-
-```bash
-python viewer.py                      # latest run, all scans
-python viewer.py --connectivity 26N
-```
-
----
-
-## Reproducibility notes
-
-- All run parameters are captured in the `runs` table of the database, so each
-  set of results is traceable to the configuration that produced it.
-- The flow simulation uses the multiple-relaxation-time (MRT) lattice-Boltzmann
-  scheme, whose permeability is independent of the relaxation parameter.
-- Results may differ in the last significant digits between machines or core
-  counts, due to floating-point summation order in parallel execution. This does
-  not affect physical conclusions.
+See _MANIFEST_full.csv for every file with its source and the reason for its bucket.
