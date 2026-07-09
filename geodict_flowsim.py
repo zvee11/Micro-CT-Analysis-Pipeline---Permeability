@@ -429,17 +429,17 @@ def pick_run(con):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-root",
-                    default=r"C:\Users\99619\Desktop\SVETA\Micro-CT-Analysis-Pipeline\output",
+                    default=r"\output",
                     help="pipeline output/ folder")
     ap.add_argument("--geodict-exe",
                     default=r"C:\Program Files\Math2Market GmbH\GeoDict 2026\geodict2026.exe")
     ap.add_argument("--macro",
-                    default=r"C:\Users\99619\Desktop\SVETA\Micro-CT-Analysis-Pipeline\scripts\geodict_lir_job.py",
+                    default=r"\scripts\geodict_lir_job.py",
                     help="path to geodict_lir_job.py")
     ap.add_argument("--result-root",
-                    default=r"C:\Users\99619\Desktop\SVETA\Micro-CT-Analysis-Pipeline\results_geodict")
+                    default=r"\results_geodict")
     ap.add_argument("--db",
-                    default=r"C:\Users\99619\Desktop\SVETA\Micro-CT-Analysis-Pipeline\results.duckdb",
+                    default=r"\results.duckdb",
                     help="results.duckdb path (writeback target)")
     ap.add_argument("--run-id", default=None,
                     help="run_id these domains belong to (default: latest run in the DB)")
