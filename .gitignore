@@ -47,4 +47,4 @@ Thumbs.db
 # ---- Whitelist small tracked refs inside data/ ----
 !data/18_Sg_3d.xlsx
 !data/Methane_Parente.xlsx
-!data/kr_results_table.csv
+!data/kr_results_table.csvresults.duckdb
