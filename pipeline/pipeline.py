@@ -173,8 +173,8 @@ def main() -> None:
     if dash_vis:
         dash_vis.init_sw_series(
             sw_series, X, all_files,
-            elapsed_minutes=elapsed_minutes if elapsed_minutes else None,
-            sat_records=sat_records if sat_records else None,
+            elapsed_minutes=x_values,
+            sat_records=sat_records if sat_records else None
         )
         dash_vis.launch()
 

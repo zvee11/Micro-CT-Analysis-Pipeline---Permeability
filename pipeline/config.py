@@ -30,14 +30,14 @@ class Config:
 
     enable_ui: bool = True
     enable_pyvista: bool = True
-    pyvista_downsample: int = 2
+    pyvista_downsample: int = 8
     enable_dash: bool = False
     dash_port: int = 8050
 
-    saturation_file: str = "data/Sg_3d_H2_19.xlsx"  # empty to skip reference comparison
+    saturation_file: str = "data/18_Sg_3d.xlsx"  # empty to skip reference comparison
     saturation_name_col: int = 0
-    saturation_sg_col: int = 8
-    saturation_time_col: int = 4
+    saturation_sg_col: int = 4
+    saturation_time_col: int = 7
 
     def __post_init__(self):
         # Auto-size the CC slab depth from available RAM when left at 0.
