@@ -1,0 +1,39 @@
+# Direct dependencies of the Micro-CT analysis pipeline, pinned to the versions
+# used for the reported results. This is the minimal set the code actually
+# imports; the full resolved environment (transitive dependencies) is captured
+# separately in requirements.lock.txt.
+#
+# GeoDict 2026 with the LIR flow solver is a separate, licensed, Windows-only
+# installation and is not a pip package. It is required only for the flow-
+# simulation stage; the geometry and database stages run without it.
+
+# --- Core geometry and numerics (pipeline package) ---
+numpy==2.2.6
+scipy==1.15.3
+connected-components-3d==3.25.0   # imported as cc3d
+scikit-image==0.25.2
+ahds==0.2.4                       # Avizo/Amira .am reader
+tifffile==2025.5.10
+
+# --- Data, provenance, and reference tables ---
+duckdb==1.5.2
+openpyxl==3.1.5
+pandas==2.3.3
+
+# --- Terminal UI and system introspection ---
+rich==14.2.0
+psutil==7.1.0
+
+# --- Figures and analysis ---
+matplotlib==3.10.7
+pillow==11.3.0                    # imported as PIL
+nbformat==5.10.4                  # scripts/build_notebook.py
+
+# --- Optional live and interactive visualisers ---
+# Required only for the Dash progress dashboard and the PyVista 3D viewer;
+# the pipeline runs headless without them.
+plotly==6.7.0
+dash==4.1.0
+dash-bootstrap-components==2.0.4
+pyvista==0.48.0
+pyvistaqt==0.11.4

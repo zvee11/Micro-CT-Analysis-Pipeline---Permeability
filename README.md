@@ -30,8 +30,10 @@ pipeline:
 6. **Flow simulation** — a batch orchestrator launches GeoDict (LIR Stokes
    solver) once per domain, extracts the Z-permeability, and writes it back to
    the database. Relative permeabilities follow as kr = K_phase / K_abs.
-7. **Analysis** — notebooks compute per-section saturations, fit basic and
-   modified Corey models, and generate all thesis figures.
+7. **Analysis** — `corey_curves.py` and the analysis notebooks compute per-section
+   saturations, fit basic and modified Corey models, write the fitted parameters
+   and per-point relative permeabilities back to the database, and generate the
+   thesis figures.
 
 ## Repository layout
 
@@ -53,6 +55,11 @@ pipeline/            The pipeline package (run with: python -m pipeline)
   visualisation.py     optional live Dash + PyVista observers
 
 geodict_flowsim.py   GeoDict batch orchestrator (one launch per domain, resumable)
+corey_curves.py      Corey-model fitting: computes kr from the stored
+                     permeabilities, fits basic and modified Corey curves against
+                     the manual baseline, and writes both the fitted parameters
+                     (corey_fits table) and the per-point kr values back to the
+                     database
 
 scripts/             Standalone tooling
   geodict_lir_job.py     GeoPy macro: one LIR Stokes run inside GeoDict
@@ -86,7 +93,8 @@ figures/             Generated thesis figures (PNG) + figure index
 data/                Small tracked references (saturation + baseline workbooks);
                      raw .am volumes live outside git (see below)
 results.duckdb       The results database (runs, scans, tracks, fixed boxes,
-                     cluster properties, simulation results, prior-work provenance)
+                     cluster properties, simulation results, prior-work
+                     provenance, Corey fits)
 ```
 
 ## Data conventions
@@ -102,11 +110,19 @@ These live on the workstation / network storage. The database records the paths,
 parameters, and results, so a run is fully reconstructible from `results.duckdb`
 plus the stored volumes.
 
+Small reference tables **are** tracked, so the analysis and comparison stages run
+without the raw volumes:
+
+- `data/18_Sg_3d.xlsx` — experimental saturation reference (the `saturation_file`,
+  `saturation_sg_col`, and `saturation_time_col` in `config.py` point here)
+- `data/Methane_Parente.xlsx` — manual baseline workbook
+- `data/kr_results_table.csv` — exported kr results
+
 ## Running
 
 ```bash
 # 1. Environment
-pip install -r requirements.lock.txt
+pip install -r requirements.txt
 
 # 2. Configure the run
 #    edit pipeline/config.py (data_dir, saturation reference, connectivity, n_keep)
@@ -120,23 +136,32 @@ python scripts/preflight_geodict.py
 # 5. Run the GeoDict batch (requires a licensed GeoDict installation)
 python geodict_flowsim.py
 
-# 6. Analysis and figures
+# 6. Fit Corey curves and write kr back to the database
+python corey_curves.py
+
+# 7. Analysis and figures
 jupyter notebook notebooks/results_figures.ipynb
 ```
 
 GeoDict runs are restartable: domains with an existing database result are skipped.
 
-## Key dependencies
+## Dependencies
 
-Python 3.10+, numpy, cc3d, scipy, ahds (Avizo file reading), duckdb, rich,
-plotly/dash and pyvista (optional visualisers), openpyxl, matplotlib.
-GeoDict 2026 with the LIR flow solver is required for the simulation stage.
+Python 3.10+. The direct dependencies the code imports are pinned in
+`requirements.txt`; the full resolved environment (all transitive dependencies) is
+captured in `requirements.lock.txt`. In brief: numpy, scipy, cc3d
+(`connected-components-3d`), scikit-image, ahds (Avizo file reading), tifffile,
+duckdb, openpyxl, pandas, rich, psutil, matplotlib, pillow, nbformat, and the
+optional visualiser stack (plotly, dash, dash-bootstrap-components, pyvista,
+pyvistaqt). GeoDict 2026 with the LIR flow solver is a separate licensed,
+Windows-only installation required only for the flow-simulation stage.
 
 ## Database
 
 `results.duckdb` — one file, keyed by `run_id` (timestamp + host). Tables:
 `runs`, `scans`, `tracks`, `fixed_boxes`, `cluster_properties`,
-`simulation_results`, `prior_work_provenance`. Open read-only for analysis:
+`simulation_results`, `prior_work_provenance`, and `corey_fits` (the fitted
+Corey parameters written by `corey_curves.py`). Open read-only for analysis:
 
 ```python
 import duckdb
